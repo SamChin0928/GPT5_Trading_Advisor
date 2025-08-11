@@ -1,0 +1,8 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Simple look */
+.btn { @apply px-3 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50; }
+.card { @apply rounded-2xl bg-slate-900/60 shadow-xl p-4 border border-slate-800; }
+.input { @apply px-3 py-2 rounded-xl bg-slate-800 border border-slate-700; }
