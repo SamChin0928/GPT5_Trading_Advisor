@@ -43,9 +43,9 @@ export default function App(){
         </div>
       </div>
 
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-1">
         <ScreenCapture onReady={onCapReady} />
-        <ROISelector refSize={refSize} zones={zones} setZones={setZones} primaryId={primaryId} setPrimaryId={setPrimaryId} />
+        {/* <ROISelector refSize={refSize} zones={zones} setZones={setZones} primaryId={primaryId} setPrimaryId={setPrimaryId} /> */}
       </div>
 
       <Controls sessionId={sessionId} zones={zones} primaryId={primaryId} captureHandle={captureRef.current} onPredict={onPredict} />
