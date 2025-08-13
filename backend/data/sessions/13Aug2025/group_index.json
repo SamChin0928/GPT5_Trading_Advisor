@@ -1,0 +1,69 @@
+{
+  "session_id": "13Aug2025",
+  "groups": [
+    {
+      "timestamp": 1755099894072,
+      "tz": "UTC",
+      "zones": [
+        {
+          "id": 0,
+          "role": "zone_0",
+          "path": "captures/1755099894072/zone_0.jpg"
+        },
+        {
+          "id": 1,
+          "role": "zone_1",
+          "path": "captures/1755099894072/zone_1.jpg"
+        }
+      ]
+    },
+    {
+      "timestamp": 1755099954360,
+      "tz": "UTC",
+      "zones": [
+        {
+          "id": 0,
+          "role": "zone_0",
+          "path": "captures/1755099954360/zone_0.jpg"
+        },
+        {
+          "id": 1,
+          "role": "zone_1",
+          "path": "captures/1755099954360/zone_1.jpg"
+        }
+      ]
+    },
+    {
+      "timestamp": 1755100014590,
+      "tz": "UTC",
+      "zones": [
+        {
+          "id": 0,
+          "role": "zone_0",
+          "path": "captures/1755100014590/zone_0.jpg"
+        },
+        {
+          "id": 1,
+          "role": "zone_1",
+          "path": "captures/1755100014590/zone_1.jpg"
+        }
+      ]
+    },
+    {
+      "timestamp": 1755100074986,
+      "tz": "UTC",
+      "zones": [
+        {
+          "id": 0,
+          "role": "zone_0",
+          "path": "captures/1755100074986/zone_0.jpg"
+        },
+        {
+          "id": 1,
+          "role": "zone_1",
+          "path": "captures/1755100074986/zone_1.jpg"
+        }
+      ]
+    }
+  ]
+}

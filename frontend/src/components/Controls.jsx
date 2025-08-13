@@ -1,173 +1,193 @@
+// src/components/Controls.jsx
 import React, { useEffect, useRef, useState } from 'react'
 import { api } from '../lib/api'
 
 export default function Controls({ sessionId, zones, primaryId, captureHandle, onPredict }) {
   const [running, setRunning] = useState(false)
-  const [intervalMs, setIntervalMs] = useState(1000)
-  const [consolidating, setConsolidating] = useState(false)
-  const timerRef = useRef(null)
+  const [intervalMin, setIntervalMin] = useState(1) // minutes
 
-  useEffect(() => { return () => stop() }, [])
+  const timerRef   = useRef(null)
+  const inFlight   = useRef(false)
+  const stoppedRef = useRef(true)
 
-  // Filter out invalid zones (with 0 width or height)
-  function getValidZones() {
-    return zones.filter(z => z.w > 0 && z.h > 0)
+  // graceful unmount
+  useEffect(() => () => stop(), [])
+
+  // Resolve capture handle (ref or direct object)
+  function resolveHandle() {
+    if (captureHandle && typeof captureHandle === 'object' && 'current' in captureHandle) {
+      return captureHandle.current
+    }
+    if (captureHandle && typeof captureHandle.captureFrame === 'function') {
+      return captureHandle
+    }
+    return null
+  }
+
+  // Only zones with positive size
+  function getValidZones(list = zones) {
+    return (list || []).filter(z => Number(z.w) > 0 && Number(z.h) > 0)
+  }
+
+  // Canvas helpers
+  function makeCanvas(w, h) {
+    if (typeof OffscreenCanvas !== 'undefined') return new OffscreenCanvas(Math.max(1, w), Math.max(1, h))
+    const c = document.createElement('canvas')
+    c.width  = Math.max(1, w)
+    c.height = Math.max(1, h)
+    return c
+  }
+
+  async function blobFromCanvas(canvas) {
+    if ('convertToBlob' in canvas) return canvas.convertToBlob({ type: 'image/jpeg', quality: 0.92 })
+    return new Promise(res => canvas.toBlob(res, 'image/jpeg', 0.92))
   }
 
   async function dataUrlFromBitmap(bmp, sx, sy, sw, sh) {
-    // Validate dimensions to prevent IndexSizeError
-    if(sw <= 0 || sh <= 0) {
-      console.warn('Invalid zone dimensions:', { sx, sy, sw, sh })
-      return null
-    }
-    
-    // Ensure we're within bounds
-    const bmpWidth = bmp.width
-    const bmpHeight = bmp.height
-    
-    sx = Math.max(0, Math.min(sx, bmpWidth))
-    sy = Math.max(0, Math.min(sy, bmpHeight))
-    sw = Math.min(sw, bmpWidth - sx)
-    sh = Math.min(sh, bmpHeight - sy)
-    
-    if(sw <= 0 || sh <= 0) {
-      console.warn('Zone extends beyond bitmap bounds')
-      return null
-    }
-    
+    if (sw <= 0 || sh <= 0) return null
+    const bw = bmp.width, bh = bmp.height
+    const x = Math.max(0, Math.min(sx, bw))
+    const y = Math.max(0, Math.min(sy, bh))
+    const w = Math.min(sw, bw - x)
+    const h = Math.min(sh, bh - y)
+    if (w <= 0 || h <= 0) return null
+
     try {
-      const canvas = new OffscreenCanvas(Math.max(1, Math.round(sw)), Math.max(1, Math.round(sh)))
+      const canvas = makeCanvas(Math.round(w), Math.round(h))
       const ctx = canvas.getContext('2d')
-      ctx.drawImage(bmp, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height)
-      const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.92 })
+      ctx.drawImage(bmp, x, y, w, h, 0, 0, canvas.width, canvas.height)
+      const blob = await blobFromCanvas(canvas)
       const buf = await blob.arrayBuffer()
       const b64 = btoa(String.fromCharCode(...new Uint8Array(buf)))
       return `data:image/jpeg;base64,${b64}`
-    } catch(err) {
+    } catch (err) {
       console.error('Error creating data URL:', err)
       return null
     }
   }
 
+  // Map overlay-normalized zone → video pixel rect using optional view info
+  function zoneToVideoRect(z, frameW, frameH, view) {
+    let nx = z.x, ny = z.y, nw = z.w, nh = z.h
+    if (view && view.scaleX > 0 && view.scaleY > 0) {
+      nx = (z.x - view.offX) / view.scaleX
+      ny = (z.y - view.offY) / view.scaleY
+      nw =  z.w              / view.scaleX
+      nh =  z.h              / view.scaleY
+    }
+    const sx = Math.round(nx * frameW)
+    const sy = Math.round(ny * frameH)
+    const sw = Math.round(nw * frameW)
+    const sh = Math.round(nh * frameH)
+    return { sx, sy, sw, sh }
+  }
+
+  // Interval in ms (min ~1s)
+  function getIntervalMs() {
+    const m = Number.isFinite(+intervalMin) ? Math.max(0.016, +intervalMin) : 1
+    return Math.round(m * 60 * 1000)
+  }
+
   function start() {
-    const validZones = getValidZones()
-    
-    if(!captureHandle) {
+    const handle = resolveHandle()
+    if (!handle) {
       alert('Please share your screen first.')
       return
     }
-    
-    if(validZones.length === 0) {
-      alert('Please draw at least one valid zone (with non-zero width and height).')
-      return
+    if (getValidZones().length === 0) {
+      console.warn('No valid zones from parent; will try zones from capture frame.')
     }
-    
+    stoppedRef.current = false
     setRunning(true)
-    loop()
-    timerRef.current = setInterval(loop, intervalMs)
+    scheduleNext(0)
   }
 
   function stop() {
+    stoppedRef.current = true
     setRunning(false)
-    if(timerRef.current) {
-      clearInterval(timerRef.current)
+    if (timerRef.current) {
+      clearTimeout(timerRef.current)
       timerRef.current = null
     }
   }
 
+  function scheduleNext(delayMs) {
+    if (timerRef.current) clearTimeout(timerRef.current)
+    const ms = (typeof delayMs === 'number') ? Math.max(0, delayMs) : getIntervalMs()
+    timerRef.current = setTimeout(loop, ms)
+  }
+
   async function loop() {
+    if (stoppedRef.current || inFlight.current) return
+    inFlight.current = true
+
     try {
-      const frame = await captureHandle.captureFrame()
-      if(!frame) return
-      
-      const { bmp, w, h } = frame
-      if(w === 0 || h === 0) return
-      
-      const validZones = getValidZones()
-      const zone_ids = []
-      const images = []
-      
-      for(const z of validZones) {
-        const sx = Math.round(z.x * w)
-        const sy = Math.round(z.y * h)
-        const sw = Math.round(z.w * w)
-        const sh = Math.round(z.h * h)
-        
-        const dataUrl = await dataUrlFromBitmap(bmp, sx, sy, sw, sh)
-        if(dataUrl) {
-          zone_ids.push(z.id)
-          images.push(dataUrl)
-        }
+      const handle = resolveHandle()
+      if (!handle || typeof handle.captureFrame !== 'function') {
+        console.warn('Capture handle missing; stopping.')
+        stop()
+        return
       }
-      
-      const timestamp = String(Date.now())
-      if(images.length > 0) {
+
+      const frame = await handle.captureFrame()
+      if (!frame) { scheduleNext(getIntervalMs()); return }
+
+      const {
+        bmp, w, h, view,
+        zones: frameZones,
+        primaryId: framePrimaryId
+      } = frame
+
+      if (!bmp || !w || !h) { scheduleNext(getIntervalMs()); return }
+
+      // Prefer parent zones; fallback to zones captured with the frame
+      let zonesForUse = getValidZones()
+      if (zonesForUse.length === 0 && Array.isArray(frameZones)) {
+        zonesForUse = getValidZones(frameZones)
+      }
+
+      // Build crops
+      const zone_ids = []
+      const images   = []
+      for (const z of zonesForUse) {
+        const { sx, sy, sw, sh } = zoneToVideoRect(z, w, h, view)
+        const dataUrl = await dataUrlFromBitmap(bmp, sx, sy, sw, sh)
+        if (dataUrl) { zone_ids.push(z.id); images.push(dataUrl) }
+      }
+
+      if (images.length > 0) {
+        const timestamp = String(Date.now())
         await api.ingest({ session_id: sessionId, timestamp, zone_ids, images })
       }
 
-      // Predict primary zone if set and valid
-      const pz = validZones.find(z => z.id === primaryId)
-      if(pz) {
-        const sx = Math.round(pz.x * w)
-        const sy = Math.round(pz.y * h)
-        const sw = Math.round(pz.w * w)
-        const sh = Math.round(pz.h * h)
-        
-        if(sw > 0 && sh > 0) {
-          // Ensure bounds
-          const validSx = Math.max(0, Math.min(sx, w))
-          const validSy = Math.max(0, Math.min(sy, h))
-          const validSw = Math.min(sw, w - validSx)
-          const validSh = Math.min(sh, h - validSy)
-          
-          if(validSw > 0 && validSh > 0) {
-            const canvas = new OffscreenCanvas(validSw, validSh)
-            const ctx = canvas.getContext('2d')
-            ctx.drawImage(bmp, validSx, validSy, validSw, validSh, 0, 0, validSw, validSh)
-            const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.92 })
-            const pred = await api.predict(sessionId, blob)
-            onPredict && onPredict(pred, blob)
-          }
+      // Optional: live prediction for primary zone
+      let pz = zonesForUse.find(z => z.id === primaryId)
+      if (!pz && typeof framePrimaryId === 'number') {
+        pz = zonesForUse.find(z => z.id === framePrimaryId)
+      }
+      if (pz) {
+        const { sx, sy, sw, sh } = zoneToVideoRect(pz, w, h, view)
+        if (sw > 0 && sh > 0) {
+          const canvas = makeCanvas(sw, sh)
+          const ctx = canvas.getContext('2d')
+          ctx.drawImage(bmp, sx, sy, sw, sh, 0, 0, sw, sh)
+          const blob = await blobFromCanvas(canvas)
+          const pred = await api.predict(sessionId, blob)
+          onPredict && onPredict(pred, blob)
         }
       }
-    } catch(err) {
+    } catch (err) {
       console.error('Loop error:', err)
-      // Don't stop on error, just continue
-    }
-  }
-
-  async function saveZones() {
-    // Only save valid zones
-    const validZones = getValidZones()
-    await api.saveZones(sessionId, validZones)
-    alert('Zones saved successfully!')
-  }
-
-  async function loadZones() {
-    const z = await api.loadZones(sessionId)
-    // Filter out invalid zones when loading
-    const validZones = z.filter(zone => zone.w > 0 && zone.h > 0)
-    window.dispatchEvent(new CustomEvent('zones:load', { detail: validZones }))
-    if(z.length !== validZones.length) {
-      console.warn(`Filtered out ${z.length - validZones.length} invalid zones`)
-    }
-  }
-
-  async function consolidate() {
-    setConsolidating(true)
-    try {
-      await api.consolidate(sessionId)
-      alert('Consolidated mosaics created successfully!')
-    } catch(err) {
-      alert('Consolidation failed: ' + err.message)
     } finally {
-      setConsolidating(false)
+      inFlight.current = false
+      if (!stoppedRef.current) scheduleNext(getIntervalMs())
     }
   }
 
   return (
     <div className="bg-gradient-to-br from-slate-900 to-slate-800 rounded-2xl p-6 shadow-2xl border border-slate-700/50">
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        {/* Capture Controls */}
         <div>
           <h3 className="text-lg font-semibold text-slate-100 mb-4 flex items-center gap-2">
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -178,19 +198,19 @@ export default function Controls({ sessionId, zones, primaryId, captureHandle, o
           </h3>
           <div className="space-y-4">
             <div className="flex items-center gap-3">
-              <span className="text-sm text-slate-400 w-24">Interval (ms)</span>
-              <input 
-                type="number" 
-                value={intervalMs} 
-                onChange={e => setIntervalMs(Math.max(100, +e.target.value))}
-                min="100"
-                step="100"
+              <span className="text-sm text-slate-400 w-28">Interval (minutes)</span>
+              <input
+                type="number"
+                value={intervalMin}
+                onChange={e => setIntervalMin(Math.max(0.016, +e.target.value || 1))}
+                min="0.016"
+                step="0.25"
                 className="flex-1 px-3 py-2 bg-slate-800/50 border border-slate-700 rounded-lg focus:outline-none focus:border-blue-500 transition-colors text-slate-100"
               />
             </div>
             <div className="flex gap-3">
-              <button 
-                onClick={start} 
+              <button
+                onClick={start}
                 disabled={running}
                 className="flex-1 px-4 py-2.5 rounded-xl bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-500 hover:to-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 font-medium shadow-lg shadow-green-900/20"
               >
@@ -201,8 +221,8 @@ export default function Controls({ sessionId, zones, primaryId, captureHandle, o
                   </span>
                 ) : 'Start Capture'}
               </button>
-              <button 
-                onClick={stop} 
+              <button
+                onClick={stop}
                 disabled={!running}
                 className="flex-1 px-4 py-2.5 rounded-xl bg-red-600/20 hover:bg-red-600/30 text-red-400 border border-red-600/30 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 font-medium"
               >
@@ -211,7 +231,8 @@ export default function Controls({ sessionId, zones, primaryId, captureHandle, o
             </div>
           </div>
         </div>
-        
+
+        {/* Zone Management (informational only) */}
         <div>
           <h3 className="text-lg font-semibold text-slate-100 mb-4 flex items-center gap-2">
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -219,39 +240,12 @@ export default function Controls({ sessionId, zones, primaryId, captureHandle, o
             </svg>
             Zone Management
           </h3>
-          <div className="grid grid-cols-2 gap-3">
-            <button 
-              onClick={saveZones}
-              disabled={zones.length === 0}
-              className="px-4 py-2.5 rounded-xl bg-slate-700 hover:bg-slate-600 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 font-medium"
-            >
-              Save Zones
-            </button>
-            <button 
-              onClick={loadZones}
-              className="px-4 py-2.5 rounded-xl bg-slate-700 hover:bg-slate-600 transition-all duration-200 font-medium"
-            >
-              Load Zones
-            </button>
-            <button 
-              onClick={consolidate}
-              disabled={consolidating}
-              className="col-span-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-500 hover:to-pink-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 font-medium shadow-lg shadow-purple-900/20"
-            >
-              {consolidating ? (
-                <span className="flex items-center justify-center gap-2">
-                  <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                  </svg>
-                  Processing...
-                </span>
-              ) : 'Consolidate Captures'}
-            </button>
-          </div>
-          {getValidZones().length < zones.length && (
-            <p className="mt-2 text-xs text-amber-400">
-              Note: {zones.length - getValidZones().length} invalid zone(s) will be ignored
+          <p className="text-xs text-slate-400">
+            Draw and manage zones in the Screen Capture panel. Zones are stored locally and used by the capture loop automatically.
+          </p>
+          {getValidZones().length < (zones?.length || 0) && (
+            <p className="mt-1 text-xs text-amber-400">
+              Note: {(zones?.length || 0) - getValidZones().length} invalid zone(s) will be ignored
             </p>
           )}
         </div>
