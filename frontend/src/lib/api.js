@@ -38,7 +38,8 @@ async function handle(res) {
   return data
 }
 
-function req(path, { method = 'GET', query, json, form, headers, signal, timeout = DEFAULT_TIMEOUT } = {}) {
+// NEW: no-store by default to avoid cached GETs (e.g., /api/train/status)
+function req(path, { method = 'GET', query, json, form, headers, signal, timeout = DEFAULT_TIMEOUT, cache = 'no-store' } = {}) {
   const url = join(BASE, path) + toQuery(query)
   const ctrl = new AbortController()
   const timer = setTimeout(() => ctrl.abort(new DOMException('Request timeout', 'AbortError')), timeout)
@@ -46,7 +47,8 @@ function req(path, { method = 'GET', query, json, form, headers, signal, timeout
   const init = {
     method,
     headers: { Accept: 'application/json', ...(headers || {}) },
-    signal: signal || ctrl.signal
+    signal: signal || ctrl.signal,
+    cache, // <--- important for status polling
   }
 
   if (json !== undefined) {
@@ -55,6 +57,9 @@ function req(path, { method = 'GET', query, json, form, headers, signal, timeout
   } else if (form instanceof FormData) {
     init.body = form // let browser set content-type boundary
   }
+
+  // Add explicit header for proxies that ignore Request.cache
+  if (method === 'GET') init.headers['Cache-Control'] = 'no-store'
 
   return fetch(url, init).then(handle).finally(() => clearTimeout(timer))
 }
@@ -104,8 +109,12 @@ export const api = {
   train: (session_id, params) =>
     req('/api/train', { method: 'POST', json: { session_id, ...params } }),
 
+  // NEW: add cache-buster for status polling to be extra safe
   trainStatus: (session_id) =>
-    req('/api/train/status', { query: { session_id } }),
+    req('/api/train/status', {
+      query: { session_id, t: Date.now() }, // bust any intermediary caches
+      timeout: 15000
+    }),
 
   predict: (session_id, blob) => {
     const fd = new FormData()
@@ -130,22 +139,13 @@ export const api = {
   annotate: (session_id, { timestamp, global_labels, by_role, notes }) =>
     req('/api/annotate', { method: 'POST', json: { session_id, timestamp, global_labels, by_role, notes } }),
 
-  // Prefer API first; fall back to static file if not present
+  // ---- annotations (API only, centralized) ----
   annotations: async (session_id) => {
     try {
       const data = await req('/api/annotations', { query: { session_id }, timeout: 10000 })
-      if (data && typeof data === 'object') return data
+      return (data && typeof data === 'object') ? data : {}
     } catch (e) {
-      if (e?.status && e.status !== 404) {
-        console.warn('annotations API error:', e)
-      }
-    }
-    try {
-      const url = sessionImageUrl(session_id, 'annotations.json')
-      const r = await fetch(url, { headers: { 'Accept': 'application/json' }, cache: 'no-store' })
-      if (!r.ok) return {}
-      return await r.json()
-    } catch {
+      console.warn('annotations API error:', e)
       return {}
     }
   },
@@ -168,8 +168,17 @@ export const api = {
   deleteGroupImageByFilename: (session_id, timestamp, filename) =>
     req('/api/group/delete_image', { method: 'POST', json: { session_id, timestamp, filename } }),
 
-
   deleteGroupImage, // <-- ensure this is exported
+
+  deleteSession: (session_id) =>
+    req('/api/session/delete', { method: 'POST', json: { session_id } }),
+
+  // ---- evaluation & group prediction (NEW) ----
+  evalHeads: (session_id) =>
+    req('/api/eval', { query: { session_id } }),
+
+  predictGroup: (session_id, timestamp) =>
+    req('/api/predict_group', { query: { session_id, ...(timestamp ? { timestamp } : {}) } }),
 
   // Expose the image URL builder
   imageUrl: sessionImageUrl,

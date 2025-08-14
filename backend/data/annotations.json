@@ -1,0 +1,219 @@
+{
+  "13Aug2025": {
+    "1755099954360": {
+      "global": [
+        "neutral"
+      ],
+      "by_role": {
+        "zone_0": [],
+        "zone_1": []
+      }
+    },
+    "1755100014590": {
+      "global": [
+        "neutral"
+      ],
+      "by_role": {
+        "zone_0": [],
+        "zone_1": []
+      }
+    }
+  },
+  "14Aug2025": {
+    "1755165246186": {
+      "global": [
+        "bear_breakout"
+      ],
+      "by_role": {
+        "zone_0": [],
+        "zone_1": []
+      }
+    },
+    "1755165306417": {
+      "global": [
+        "consolidation"
+      ],
+      "by_role": {
+        "zone_0": [],
+        "zone_1": []
+      }
+    },
+    "1755165366628": {
+      "global": [
+        "consolidation"
+      ],
+      "by_role": {
+        "zone_0": [],
+        "zone_1": []
+      }
+    },
+    "1755165426837": {
+      "global": [
+        "neutral"
+      ],
+      "by_role": {
+        "zone_0": [],
+        "zone_1": []
+      }
+    },
+    "1755165487036": {
+      "global": [
+        "consolidation",
+        "neutral"
+      ],
+      "by_role": {
+        "zone_0": [],
+        "zone_1": []
+      }
+    },
+    "1755165547208": {
+      "global": [
+        "bear_breakout"
+      ],
+      "by_role": {
+        "zone_0": [],
+        "zone_1": []
+      }
+    },
+    "1755165607422": {
+      "global": [
+        "bear_breakout"
+      ],
+      "by_role": {
+        "zone_0": [],
+        "zone_1": []
+      }
+    },
+    "1755165667611": {
+      "global": [
+        "neutral"
+      ],
+      "by_role": {
+        "zone_0": [],
+        "zone_1": []
+      }
+    },
+    "1755165727800": {
+      "global": [
+        "bear_breakout"
+      ],
+      "by_role": {
+        "zone_0": [],
+        "zone_1": []
+      }
+    }
+  },
+  "job_41dde097": {
+    "13Aug2025__1755099954360": {
+      "global": [
+        "neutral"
+      ],
+      "by_role": {
+        "zone_0": [],
+        "zone_1": []
+      },
+      "notes": null
+    },
+    "13Aug2025__1755100014590": {
+      "global": [
+        "neutral"
+      ],
+      "by_role": {
+        "zone_0": [],
+        "zone_1": []
+      },
+      "notes": null
+    },
+    "14Aug2025__1755165246186": {
+      "global": [
+        "bear_breakout"
+      ],
+      "by_role": {
+        "zone_0": [],
+        "zone_1": []
+      },
+      "notes": null
+    },
+    "14Aug2025__1755165306417": {
+      "global": [
+        "consolidation"
+      ],
+      "by_role": {
+        "zone_0": [],
+        "zone_1": []
+      },
+      "notes": null
+    },
+    "14Aug2025__1755165366628": {
+      "global": [
+        "consolidation"
+      ],
+      "by_role": {
+        "zone_0": [],
+        "zone_1": []
+      },
+      "notes": null
+    },
+    "14Aug2025__1755165426837": {
+      "global": [
+        "neutral"
+      ],
+      "by_role": {
+        "zone_0": [],
+        "zone_1": []
+      },
+      "notes": null
+    },
+    "14Aug2025__1755165487036": {
+      "global": [
+        "consolidation",
+        "neutral"
+      ],
+      "by_role": {
+        "zone_0": [],
+        "zone_1": []
+      },
+      "notes": null
+    },
+    "14Aug2025__1755165547208": {
+      "global": [
+        "bear_breakout"
+      ],
+      "by_role": {
+        "zone_0": [],
+        "zone_1": []
+      },
+      "notes": null
+    },
+    "14Aug2025__1755165607422": {
+      "global": [
+        "bear_breakout"
+      ],
+      "by_role": {
+        "zone_0": [],
+        "zone_1": []
+      },
+      "notes": null
+    },
+    "14Aug2025__1755165667611": {
+      "global": [
+        "neutral"
+      ],
+      "by_role": {
+        "zone_0": [],
+        "zone_1": []
+      },
+      "notes": null
+    },
+    "14Aug2025__1755165727800": {
+      "global": [
+        "bear_breakout"
+      ],
+      "by_role": {
+        "zone_0": [],
+        "zone_1": []
+      },
+      "notes": null
+    }
+  }
+}

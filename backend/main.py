@@ -10,16 +10,17 @@ import json
 import threading
 import shutil
 from uuid import uuid4
+from .training import predict_group_probs, evaluate_session
 
 from PIL import Image
 from .utils import (
     DATA_DIR, ensure_session_dirs, decode_data_url_to_pil,
     save_zone_crops, make_mosaic_horiz,
     upsert_group_entry, read_json, add_label_to_vocab, load_vocab,
-    upsert_annotation, ensure_simple_dir
+    upsert_annotation, ensure_simple_dir,
+    load_annotations, save_session_annotations   # <-- add these
 )
 from .model import load_model, predict_pil, CLASSES
-from .training import train_model, TrainConfig
 
 app = FastAPI(title="Chart Pattern Detector API")
 
@@ -106,6 +107,11 @@ class DeleteImagePayload(BaseModel):
     # Provide either the full relative path (preferred) or just the filename
     path: Optional[str] = None
     filename: Optional[str] = None
+
+# --- schema ---
+class DeleteSessionPayload(BaseModel):
+    session_id: str
+
 
 # ========= Health =========
 
@@ -270,7 +276,7 @@ def collect_groups_for_session(session_id: str, create_if_needed: bool = True) -
     else:
         sdir = ensure_session_dirs(session_id) if create_if_needed else _session_path(session_id)
 
-    ann_map = read_json(sdir / "annotations.json", {})
+    ann_map = load_annotations(sdir)  # central per-session slice
     base_groups = _collect_from_index_or_captures_or_flat(sdir)
 
     out: List[Dict] = []
@@ -323,14 +329,11 @@ def get_groups_all(only_unlabeled: int = Query(0, ge=0, le=1)):
     all_groups = sorted(all_groups, key=lambda g: _ts_sort_key(g.get("timestamp", "")))
     return {"groups": all_groups}
 
+# /api/annotations: return central slice
 @app.get("/api/annotations")
 def get_annotations(session_id: str):
-    # avoid creating structure for zones-* namespaces
-    if session_id.startswith("zones-"):
-        sdir = _session_path(session_id)
-    else:
-        sdir = ensure_session_dirs(session_id)
-    return read_json(sdir / "annotations.json", {})
+    sdir = _session_path(session_id)  # read-only: no need to scaffold for central
+    return load_annotations(sdir)
 
 @app.post("/api/annotate")
 def annotate(payload: AnnotationPayload):
@@ -369,7 +372,7 @@ def _safe_under(base: Path, p: Path) -> bool:
 @app.post("/api/group/delete")
 def delete_group(payload: DeleteGroupPayload):
     sdir = ensure_session_dirs(payload.session_id)
-    ts = _norm_ts(payload.timestamp)  # <-- normalize once
+    ts = _norm_ts(payload.timestamp)
 
     cap_dir = sdir / "captures" / ts
     mos_jpg = sdir / "mosaics" / f"{ts}.jpg"
@@ -381,27 +384,24 @@ def delete_group(payload: DeleteGroupPayload):
         removed["captures"] = True
 
     if mos_jpg.exists() and _safe_under(sdir, mos_jpg):
-        try:
-            mos_jpg.unlink(missing_ok=True)
-        except Exception:
-            pass
+        try: mos_jpg.unlink(missing_ok=True)
+        except Exception: pass
         removed["mosaic"] = True
 
     gi_path = sdir / "group_index.json"
     gi = read_json(gi_path, None)
     if isinstance(gi, dict) and isinstance(gi.get("groups"), list):
-        # normalize group timestamps on comparison
         new_groups = [g for g in gi["groups"] if _norm_ts(g.get("timestamp")) != ts]
         if len(new_groups) != len(gi["groups"]):
             gi["groups"] = new_groups
             gi_path.write_text(json.dumps(gi, indent=2))
             removed["index_pruned"] = True
 
-    ann_path = sdir / "annotations.json"
-    ann = read_json(ann_path, {})
+    # CENTRAL annotations prune
+    ann = load_annotations(sdir)
     if isinstance(ann, dict) and ts in ann:
         ann.pop(ts, None)
-        ann_path.write_text(json.dumps(ann, indent=2))
+        save_session_annotations(sdir.name, ann)
         removed["annotation_pruned"] = True
 
     return {"ok": True, "removed": removed}
@@ -412,9 +412,9 @@ def delete_group_image(payload: DeleteImagePayload):
         raise HTTPException(status_code=400, detail="Provide either 'path' or 'filename'.")
 
     sdir = ensure_session_dirs(payload.session_id)
-    ts = _norm_ts(payload.timestamp)  # <-- normalize once
+    ts = _norm_ts(payload.timestamp)
 
-    # Resolve the on-disk file
+    # Resolve target path
     if payload.path:
         rel = Path(payload.path)
         if rel.parts[0] != "captures":
@@ -424,7 +424,18 @@ def delete_group_image(payload: DeleteImagePayload):
         target = sdir / rel
     else:
         target = sdir / "captures" / ts / payload.filename
-    
+
+    if not _safe_under(sdir, target):
+        raise HTTPException(status_code=400, detail="Invalid path.")
+
+    file_removed = False
+    try:
+        if target.exists():
+            target.unlink()
+            file_removed = True
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete file: {e}")
+
     gi_path = sdir / "group_index.json"
     gi = read_json(gi_path, None)
     pruned_group = False
@@ -454,24 +465,23 @@ def delete_group_image(payload: DeleteImagePayload):
 
     tdir = sdir / "captures" / ts
     if tdir.exists() and not any(tdir.iterdir()):
-        try:
-            shutil.rmtree(tdir, ignore_errors=True)
-        except Exception:
-            pass
+        try: shutil.rmtree(tdir, ignore_errors=True)
+        except Exception: pass
         group_empty = True
 
     if group_empty:
-        ann_path = sdir / "annotations.json"
-        ann = read_json(ann_path, {})
+        # CENTRAL annotations prune when folder empties
+        ann = load_annotations(sdir)
         if isinstance(ann, dict) and ts in ann:
             ann.pop(ts, None)
-            ann_path.write_text(json.dumps(ann, indent=2))
+            save_session_annotations(sdir.name, ann)
         mos_jpg = sdir / "mosaics" / f"{ts}.jpg"
         if mos_jpg.exists():
-            try:
-                mos_jpg.unlink(missing_ok=True)
-            except Exception:
-                pass
+            try: mos_jpg.unlink(missing_ok=True)
+            except Exception: pass
+
+    return {"ok": True, "file_removed": file_removed, "group_empty": group_empty, "timestamp": ts}
+
 
 
 # ========= Multi-session training support =========
@@ -506,7 +516,7 @@ def _build_merged_training_session(session_ids: List[str]) -> Path:
 
         sdir = ensure_session_dirs(sid)
         base_groups = _collect_from_index_or_captures_or_flat(sdir)
-        ann_map = read_json(sdir / "annotations.json", {})
+        ann_map = load_annotations(sdir)
 
         for g in base_groups:
             ts = str(g.get("timestamp", ""))
@@ -592,34 +602,59 @@ def start_train(payload: TrainPayload):
     job_key = anchor_sid  # keep status keyed by anchor session_id for UI compatibility
     TRAIN_PROGRESS[job_key] = {
         "status": "running",
+        "stage": "detect_pipeline",   # NEW: breadcrumb for UI
         "epoch": 0,
         "epochs": payload.epochs,
-        "sessions": session_ids
+        "sessions": session_ids,
+        "train_dir": str(train_dir),
     }
 
+    # ---- run the trainer in the background thread (this was missing) ----
     def _runner():
         try:
-            cfg = TrainConfig(
+            print(f"[api/train] starting job for {job_key} on {train_dir} (sessions={session_ids})")
+            # Import inside the thread to avoid NameError after reloads
+            from .training import train_model as _train_model, TrainConfig as _TrainConfig
+
+            cfg = _TrainConfig(
                 session_dir=train_dir,
                 epochs=payload.epochs,
                 lr=payload.lr,
                 batch_size=payload.batch_size
             )
-            # Trainer auto-detects annotations.json vs legacy labels.json
-            train_model(cfg, TRAIN_PROGRESS[job_key])
 
-            # Copy learned weights back to the anchor session
+            _train_model(cfg, TRAIN_PROGRESS[job_key])  # this updates TRAIN_PROGRESS internally
+
+            # Copy learned artifacts back to the anchor session
+            anchor_dir = ensure_session_dirs(anchor_sid)
+            (anchor_dir / "model").mkdir(parents=True, exist_ok=True)
+
+            # weights (legacy)
             src_weights = train_dir / "model" / "weights.pth"
             if src_weights.exists():
-                dst_weights = ensure_session_dirs(anchor_sid) / "model" / "weights.pth"
-                dst_weights.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(src_weights, dst_weights)
+                shutil.copy2(src_weights, anchor_dir / "model" / "weights.pth")
+
+            # heads + report (new pipeline)
+            src_heads = train_dir / "model" / "heads.pkl"
+            if src_heads.exists():
+                shutil.copy2(src_heads, anchor_dir / "model" / "heads.pkl")
+            src_report = train_dir / "model" / "train_report.json"
+            if src_report.exists():
+                shutil.copy2(src_report, anchor_dir / "model" / "train_report.json")
+
+            print(f"[api/train] job for {job_key} finished")
+            # training module already sets status=done; keep it if present
+            TRAIN_PROGRESS[job_key].setdefault("status", "done")
 
         except Exception as e:
+            print(f"[api/train] ERROR: {e}")
             TRAIN_PROGRESS[job_key].update({"status": "error", "error": str(e)})
 
-    threading.Thread(target=_runner, daemon=True).start()
-    return {"ok": True, "job": job_key, "sessions": session_ids}
+    t = threading.Thread(target=_runner, daemon=True)  # NEW/CHANGED
+    t.start()                                          # NEW/CHANGED
+
+    return {"ok": True, "job": job_key, "sessions": session_ids, "train_dir": str(train_dir)}  # NEW/CHANGED
+
 
 @app.get("/api/train/status")
 def train_status(session_id: str):
@@ -651,3 +686,71 @@ def predict(session_id: str, file: UploadFile = File(...)):
 
     out = predict_pil(model, preprocess, img)
     return out
+
+@app.post("/api/session/delete")
+def delete_session(payload: DeleteSessionPayload):
+    sroot = _sessions_root()
+    sdir = _session_path(payload.session_id)
+
+    if not sdir.exists():
+        return {"ok": True, "removed": False, "note": "session not found"}
+
+    # Safety: ensure within sessions root
+    if not _safe_under(sroot, sdir):
+        raise HTTPException(status_code=400, detail="Invalid session path")
+
+    # Remove on-disk folder
+    shutil.rmtree(sdir, ignore_errors=True)
+
+    # Prune CENTRAL annotations for this session
+    save_session_annotations(payload.session_id, {})
+
+    return {"ok": True, "removed": True, "session_id": payload.session_id}
+
+
+# ========= Group prediction (embeddings+heads) =========
+
+@app.get("/api/predict_group")
+def predict_group(session_id: str, timestamp: Optional[str] = None):
+    sdir = ensure_session_dirs(session_id)
+    heads = sdir / "model" / "heads.pkl"
+    if not heads.exists():
+        raise HTTPException(status_code=400, detail="No heads.pkl found. Train embeddings+heads first.")
+
+    # pick latest timestamp if none provided
+    if timestamp is None:
+        gi = (sdir / "group_index.json")
+        gidx = read_json(gi, {"groups": []})
+        if not gidx.get("groups"):
+            raise HTTPException(status_code=400, detail="No groups available.")
+        latest = sorted(gidx["groups"], key=lambda g: int(str(g.get('timestamp', '0'))))[-1]
+        timestamp = str(latest.get("timestamp"))
+
+    try:
+        probs = predict_group_probs(sdir, str(timestamp))
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # thresholded labels (for convenience)
+    import pickle
+    with open(heads, "rb") as f:
+        hp = pickle.load(f)
+    thresholds = hp.get("thresholds", {})
+    preds = [lid for lid, p in probs.items() if p >= thresholds.get(lid, 0.5)]
+    top = max(probs, key=probs.get) if probs else None
+    return {"session_id": session_id, "timestamp": str(timestamp), "top": top, "preds": preds, "probs": probs, "thresholds": thresholds}
+
+
+# ========= Evaluation on annotated groups (embeddings+heads) =========
+
+@app.get("/api/eval")
+def eval_heads(session_id: str):
+    sdir = ensure_session_dirs(session_id)
+    heads = sdir / "model" / "heads.pkl"
+    if not heads.exists():
+        raise HTTPException(status_code=400, detail="No heads.pkl found. Train embeddings+heads first.")
+    try:
+        res = evaluate_session(sdir)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"session_id": session_id, **res}

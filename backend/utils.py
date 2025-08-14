@@ -14,7 +14,28 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 # global vocab (shared across sessions)
 LABELS_DIR = BASE_DIR / "data" / "labels"
 VOCAB_PATH = LABELS_DIR / "vocab.json"
+CENTRAL_ANN_PATH = BASE_DIR / "data" / "annotations.json"
 
+def _read_central_ann():
+    return read_json(CENTRAL_ANN_PATH, {})
+
+def _write_central_ann(obj):
+    write_json_atomic(CENTRAL_ANN_PATH, obj)
+
+def _load_session_ann_from_central(session_id: str) -> Dict[str, Dict]:
+    data = _read_central_ann()
+    sess = data.get(session_id)
+    return sess if isinstance(sess, dict) else {}
+
+def _save_session_ann_to_central(session_id: str, sess_map: Dict[str, Dict]):
+    data = _read_central_ann()
+    if sess_map and isinstance(sess_map, dict):
+        data[session_id] = sess_map
+    else:
+        # delete empty key
+        if session_id in data:
+            data.pop(session_id, None)
+    _write_central_ann(data)
 
 def ensure_session_dirs(session_id: str) -> Path:
     """Create session folders lazily."""
@@ -211,3 +232,54 @@ def upsert_annotation(
     ann[ts] = rec
     write_json_atomic(ann_path, ann)
     return rec
+
+# ========== Annotations (CENTRAL, group-level) ==========
+
+def load_annotations(session_dir: Path) -> Dict[str, Dict]:
+    """
+    Backward compatible: returns THIS session's map { "<ts>": {...} } from the central file.
+    If a legacy per-session annotations.json exists, import it into central once.
+    """
+    session_id = session_dir.name
+    sess = _load_session_ann_from_central(session_id)
+    if sess:
+        return sess
+
+    # one-time lazy migration from legacy per-session file
+    legacy = read_json(session_dir / "annotations.json", {})
+    if isinstance(legacy, dict) and legacy:
+        _save_session_ann_to_central(session_id, legacy)
+        return legacy
+    return {}
+
+def upsert_annotation(
+    session_dir: Path,
+    timestamp: str | int,
+    global_labels: Optional[List[str]],
+    by_role: Optional[Dict[str, List[str]]],
+    notes: Optional[str] = None
+) -> Dict:
+    session_id = session_dir.name
+    ann = load_annotations(session_dir)  # this now reads central
+    ts = str(int(str(timestamp)))
+
+    rec = ann.get(ts, {})
+    if global_labels is not None:
+        seen = set()
+        rec["global"] = [x for x in global_labels if not (x in seen or seen.add(x))]
+    if by_role is not None:
+        brec = {}
+        for k, vals in by_role.items():
+            seen = set()
+            brec[k] = [x for x in vals if not (x in seen or seen.add(x))]
+        rec["by_role"] = brec
+    if notes is not None:
+        rec["notes"] = notes
+
+    ann[ts] = rec
+    _save_session_ann_to_central(session_id, ann)
+    return rec
+
+# (OPTIONAL public helper used by main.py deletions)
+def save_session_annotations(session_id: str, sess_map: Dict[str, Dict]):
+    _save_session_ann_to_central(session_id, sess_map)

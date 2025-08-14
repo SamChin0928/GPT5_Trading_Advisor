@@ -11,6 +11,18 @@
       "name": "Neutral",
       "slug": "neutral",
       "parent": null
+    },
+    {
+      "id": "bear_breakout",
+      "name": "Bear Breakout",
+      "slug": "bear-breakout",
+      "parent": null
+    },
+    {
+      "id": "consolidation",
+      "name": "Consolidation",
+      "slug": "consolidation",
+      "parent": null
     }
   ]
 }

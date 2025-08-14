@@ -1,7 +1,8 @@
 // components/Labeler.jsx
 import React, { useEffect, useMemo, useState } from 'react'
 import { api } from '../lib/api'
-import { Trash2, Info, Loader2, Space } from 'lucide-react'
+import { Trash2, Info, CheckCircle2, Clock } from 'lucide-react'
+import TrainControls from './TrainControls' // <-- use shared component
 
 // --- small helpers ---
 function fmtTS(ts, tz) {
@@ -59,12 +60,12 @@ function HelpModal({ open, onClose }) {
             <h3 className="text-slate-100 font-semibold">How to use training & labels</h3>
           </div>
           <ol className="list-decimal ml-5 space-y-2 text-sm text-slate-300">
-            <li>Capture screen and create folders of images automatically.</li>
-            <li>Open a folder and add <b>Folder labels</b> (top right presets help).</li>
-            <li>Optionally add labels per image (Zone 0 / Zone 1 etc.).</li>
-            <li>Save the folder. “Labeled” badge turns green.</li>
-            <li>In <b>Training</b>, set epochs / LR / batch and check <b>Train on all sessions</b> if you want to include past dates.</li>
-            <li>Click <b>Train</b>. Status shows <i>running / epoch</i>. Once done, predictions will use the new weights.</li>
+            <li>Capture your screen — folders (by timestamp) are created automatically.</li>
+            <li>Open a folder and add <b>Folder labels</b> (use the presets for speed).</li>
+            <li>Optionally add labels per image (Zone 0 / Zone 1…).</li>
+            <li>Save the folder. The “Labeled” badge turns green.</li>
+            <li>Go to <b>Training</b> and click <b>Train</b>. The model <i>auto-tunes</i> (epochs, LR, batch, thresholds) based on your data.</li>
+            <li>Use “Train on all sessions” if you want to include past dates. After training, predictions will use the new model.</li>
           </ol>
           <div className="mt-4 flex justify-end">
             <button onClick={onClose}
@@ -78,92 +79,23 @@ function HelpModal({ open, onClose }) {
   )
 }
 
-/* ---------- Training controls ---------- */
-function TrainControls({ sessionId }) {
-  const [epochs, setEpochs] = useState(5)
-  const [lr, setLR] = useState(1e-3)
-  const [batch, setBatch] = useState(16)
-  const [includeAll, setIncludeAll] = useState(false)
-  const [status, setStatus] = useState('idle')
-  const [busy, setBusy] = useState(false)
-
-  useEffect(() => {
-    let t = null, alive = true
-    async function poll() {
-      try {
-        const s = await api.trainStatus(sessionId)
-        if (!alive) return
-        setStatus(typeof s?.status === 'string' ? s.status : 'idle')
-      } catch {}
-      t = setTimeout(poll, 1200)
-    }
-    poll()
-    return () => { alive = false; if (t) clearTimeout(t) }
-  }, [sessionId])
-
-  async function start() {
-    setBusy(true)
-    try {
-      await api.train(sessionId, {
-        epochs: Number(epochs) || 5,
-        lr: Number(lr) || 1e-3,
-        batch_size: Number(batch) || 16,
-        include_all: !!includeAll
-      })
-    } finally {
-      setBusy(false)
-    }
-  }
-
+function StatusPill({ labeled, className = '' }) {
   return (
-    <>
-      <div className="mb-6 rounded-2xl border border-slate-700/50 bg-gradient-to-b from-slate-900 to-slate-900/70 shadow-2xl p-4">
-        <div className="flex items-center justify-between mb-3">
-          <div className="text-lg font-semibold text-slate-100">Training</div>
-          <span className="text-xs px-2 py-1 rounded-full bg-slate-800 text-slate-300 border border-white/10">
-            {status || 'idle'}
-          </span>
-        </div>
-
-        <div className="grid md:grid-cols-12 gap-3">
-          <label className="md:col-span-2 text-[13px] text-slate-300">Epochs
-            <input type="number" min="1" step="1" value={epochs}
-              onChange={e => setEpochs(Math.max(1, +e.target.value || 5))}
-              className="mt-1 w-full px-3 py-2 rounded-lg bg-slate-800/60 border border-white/10 text-slate-100" />
-          </label>
-
-          <label className="md:col-span-3 text-[13px] text-slate-300">Learning Rate
-            <input type="number" step="0.0001" value={lr}
-              onChange={e => setLR(+e.target.value || 0.001)}
-              className="mt-1 w-full px-3 py-2 rounded-lg bg-slate-800/60 border border-white/10 text-slate-100" />
-          </label>
-
-          <label className="md:col-span-2 text-[13px] text-slate-300">Batch Size
-            <input type="number" min="1" step="1" value={batch}
-              onChange={e => setBatch(Math.max(1, +e.target.value || 16))}
-              className="mt-1 w-full px-3 py-2 rounded-lg bg-slate-800/60 border border-white/10 text-slate-100" />
-          </label>
-
-          <label className="md:col-span-3 flex items-end gap-2 text-[13px] text-slate-300">
-            <input type="checkbox" className="accent-emerald-500" checked={includeAll}
-                   onChange={e => setIncludeAll(e.target.checked)} />
-            Train on all sessions
-          </label>
-
-          <div className="md:col-span-2 flex items-end justify-end gap-2">
-            <button
-              onClick={start}
-              disabled={busy}
-              className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium disabled:opacity-60"
-            >
-              {busy ? <span className="inline-flex items-center gap-2">
-                <Loader2 className="w-4 h-4 animate-spin" /> Starting…
-              </span> : 'Train'}
-            </button>
-          </div>
-        </div>
-      </div>
-    </>
+    <span
+      className={[
+        'inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium',
+        'shadow-sm ring-1 backdrop-blur-[1px]',
+        labeled
+          ? 'bg-gradient-to-b from-emerald-500/20 to-emerald-500/10 text-emerald-100 ring-emerald-400/30'
+          : 'bg-gradient-to-b from-amber-500/20 to-amber-500/10 text-amber-100 ring-amber-400/30',
+        className
+      ].join(' ')}
+      aria-label={labeled ? 'Labeled' : 'Unlabeled'}
+      title={labeled ? 'Labeled' : 'Unlabeled'}
+    >
+      {labeled ? <CheckCircle2 className="w-3.5 h-3.5" /> : <Clock className="w-3.5 h-3.5" />}
+      <span className="leading-none">{labeled ? 'Labeled' : 'Unlabeled'}</span>
+    </span>
   )
 }
 
@@ -421,18 +353,18 @@ export default function Labeler({ sessionId }) {
         </div>
       </div>
 
-      {/* Training controls (nice, compact) */}
+      {/* Training controls (auto) */}
       <TrainControls sessionId={sessionId} />
 
       {loading && <div className="text-slate-400 text-sm">Loading…</div>}
       {!loading && visibleGroups.length === 0 && (
-        <div className="text-slate-400 text-sm">
+        <div className="text-slate-400 text-sm m-4">
           {onlyUnlabeled ? 'No unlabeled folders.' : 'No folders found.'}
         </div>
       )}
 
       {/* Folder grid */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4 m-4">
         {visibleGroups.map(g => {
           const ts = String(g.timestamp)
           const sid = g.session_id || sessionId
@@ -447,16 +379,9 @@ export default function Labeler({ sessionId }) {
                           ${isLabeled ? 'bg-emerald-500/5 border-emerald-500/30'
                                       : 'bg-white/5 border-white/10'}`}
             >
-              {/* make controls sit above everything */}
+              {/* overlay controls */}
               <div className="pointer-events-none absolute inset-0 z-20">
-                <span
-                  className={`absolute top-2 left-2 px-2 py-0.5 rounded-full text-[10px] font-medium border pointer-events-auto
-                             ${isLabeled
-                               ? 'bg-emerald-500/15 text-emerald-200 border-emerald-400/30'
-                               : 'bg-amber-500/10 text-amber-200 border-amber-400/20'}`}
-                >
-                  {isLabeled ? '✓ Labeled' : 'Unlabeled'}
-                </span>
+                <StatusPill labeled={isLabeled} className="absolute top-3 left-3 pointer-events-auto" />
                 <button
                   onClick={() => deleteFolder(sid, ts)}
                   className="absolute top-2 right-2 p-2 rounded-lg bg-red-500/20 hover:bg-red-500/30 text-red-200 border border-red-400/30 pointer-events-auto opacity-0 group-hover:opacity-100 transition"
@@ -533,14 +458,7 @@ export default function Labeler({ sessionId }) {
                     </div>
 
                     {/* status pill sits next to Save */}
-                    <span
-                      className={`px-2 py-0.5 rounded-full text-[10px] font-medium border
-                                  ${isLabeled
-                                    ? 'bg-emerald-500/15 text-emerald-200 border-emerald-400/30'
-                                    : 'bg-amber-500/10 text-amber-200 border-amber-400/20'}`}
-                    >
-                      {isLabeled ? '✓ Labeled' : 'Unlabeled'}
-                    </span>
+                    <StatusPill labeled={isLabeled} />
 
                     <button
                       onClick={() => saveGroup(open.sid, open.ts)}
