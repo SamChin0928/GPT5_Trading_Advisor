@@ -6,9 +6,24 @@ export default function Controls({ sessionId, zones, primaryId, captureHandle, o
   const [running, setRunning] = useState(false)
   const [intervalMin, setIntervalMin] = useState(1) // minutes
 
+  // NEW: track whether screen sharing is active
+  const [sharing, setSharing] = useState(false)
+
   const timerRef   = useRef(null)
   const inFlight   = useRef(false)
   const stoppedRef = useRef(true)
+
+  // listen for ScreenCapture share status
+  useEffect(() => {
+    const onShare = (e) => {
+      const { isSharing } = e.detail || {}
+      setSharing(!!isSharing)
+      // auto-stop if sharing ended while recording
+      if (!isSharing) stop()
+    }
+    window.addEventListener('screenshare:change', onShare)
+    return () => window.removeEventListener('screenshare:change', onShare)
+  }, [])
 
   // graceful unmount
   useEffect(() => () => stop(), [])
@@ -89,6 +104,11 @@ export default function Controls({ sessionId, zones, primaryId, captureHandle, o
   }
 
   function start() {
+    // NEW GUARD: do not start if not sharing
+    if (!sharing) {
+      alert('Please share your screen before starting capture.')
+      return
+    }
     const handle = resolveHandle()
     if (!handle) {
       alert('Please share your screen first.')
@@ -211,8 +231,9 @@ export default function Controls({ sessionId, zones, primaryId, captureHandle, o
             <div className="flex gap-3">
               <button
                 onClick={start}
-                disabled={running}
+                disabled={running || !sharing} // NEW: disabled unless sharing
                 className="flex-1 px-4 py-2.5 rounded-xl bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-500 hover:to-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 font-medium shadow-lg shadow-green-900/20"
+                title={sharing ? '' : 'Share your screen to enable capture'}
               >
                 {running ? (
                   <span className="flex items-center justify-center gap-2">
@@ -229,6 +250,11 @@ export default function Controls({ sessionId, zones, primaryId, captureHandle, o
                 Stop
               </button>
             </div>
+            {!sharing && (
+              <div className="text-xs text-amber-300/80">
+                Share your screen in the Screen Capture panel to enable recording.
+              </div>
+            )}
           </div>
         </div>
 

@@ -1,3 +1,5 @@
+// lib/api.js
+
 // Resolve base: env (VITE_API_BASE) or '' for relative (use Vite proxy)
 const RAW  = import.meta?.env?.VITE_API_BASE?.trim?.()
 export const BASE = RAW ? RAW.replace(/\/+$/, '') : ''
@@ -57,6 +59,23 @@ function req(path, { method = 'GET', query, json, form, headers, signal, timeout
   return fetch(url, init).then(handle).finally(() => clearTimeout(timer))
 }
 
+// Build a safe image URL for a file relative to a session folder
+// Use /api/data when BASE is empty (dev); use /data when BASE is set (prod).
+const sessionImageUrl = (session_id, relPath) => {
+  const safe = String(relPath).split('/').map(encodeURIComponent).join('/')
+  const DATA_PREFIX = BASE ? '/data' : '/api/data'
+  return join(BASE, `${DATA_PREFIX}/sessions/${encodeURIComponent(session_id)}/${safe}`)
+}
+
+const deleteGroupImage = (session_id, timestamp, pathOrFilename) => {
+  const s = String(pathOrFilename || '')
+  const hasSlash = s.includes('/')
+  return hasSlash
+    ? req('/api/group/delete_image', { method: 'POST', json: { session_id, timestamp, path: s } })
+    : req('/api/group/delete_image', { method: 'POST', json: { session_id, timestamp, filename: s } })
+}
+
+// Export the API functions
 export const api = {
   // ---- health ----
   health: () => req('/api/health'),
@@ -95,26 +114,63 @@ export const api = {
     return req('/api/predict', { method: 'POST', query: { session_id }, form: fd })
   },
 
-  // ---- NEW: vocab / groups / annotations ----
+  // ---- vocab / groups / annotations ----
   getVocab: () => req('/api/labels/vocab'),
   createVocabLabel: (name, parent) =>
     req('/api/labels/vocab', { method: 'POST', json: { name, parent } }),
 
+  // Single-session groups (include ann + labeled from backend)
   groups: (session_id) =>
     req('/api/groups', { query: { session_id } }),
+
+  // All sessions (set onlyUnlabeled=true to fetch only unlabeled)
+  groupsAll: (onlyUnlabeled = false) =>
+    req('/api/groups_all', { query: { only_unlabeled: onlyUnlabeled ? 1 : 0 } }),
 
   annotate: (session_id, { timestamp, global_labels, by_role, notes }) =>
     req('/api/annotate', { method: 'POST', json: { session_id, timestamp, global_labels, by_role, notes } }),
 
-  // Helper: load existing annotations (served statically)
+  // Prefer API first; fall back to static file if not present
   annotations: async (session_id) => {
-    const url = `${BASE}/data/sessions/${encodeURIComponent(session_id)}/annotations.json`
     try {
-      const res = await fetch(url, { headers: { 'Accept': 'application/json' } })
-      if (!res.ok) return {}
-      return await res.json()
+      const data = await req('/api/annotations', { query: { session_id }, timeout: 10000 })
+      if (data && typeof data === 'object') return data
+    } catch (e) {
+      if (e?.status && e.status !== 404) {
+        console.warn('annotations API error:', e)
+      }
+    }
+    try {
+      const url = sessionImageUrl(session_id, 'annotations.json')
+      const r = await fetch(url, { headers: { 'Accept': 'application/json' }, cache: 'no-store' })
+      if (!r.ok) return {}
+      return await r.json()
     } catch {
       return {}
     }
-  }
+  },
+
+  // ---- deletion helpers (NEW) ----
+  /**
+   * Delete an entire timestamp folder (captures + mosaic) and prune indexes.
+   */
+  deleteGroup: (session_id, timestamp) =>
+    req('/api/group/delete', { method: 'POST', json: { session_id, timestamp } }),
+
+  /**
+   * Delete a single image inside captures/<timestamp>.
+   * Pass either a full relative path (preferred) or just the filename.
+   * Example path: "captures/1723567890000/zone_1.jpg"
+   */
+  deleteGroupImageByPath: (session_id, timestamp, path) =>
+    req('/api/group/delete_image', { method: 'POST', json: { session_id, timestamp, path } }),
+
+  deleteGroupImageByFilename: (session_id, timestamp, filename) =>
+    req('/api/group/delete_image', { method: 'POST', json: { session_id, timestamp, filename } }),
+
+
+  deleteGroupImage, // <-- ensure this is exported
+
+  // Expose the image URL builder
+  imageUrl: sessionImageUrl,
 }

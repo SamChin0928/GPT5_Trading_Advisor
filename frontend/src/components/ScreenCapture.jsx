@@ -8,8 +8,8 @@ export default function ScreenCapture({ onReady }) {
   const [zones, setZones] = useState([])
   const [primaryId, setPrimaryId] = useState(null)
   const [isSharing, setIsSharing] = useState(false)
-  const [isPaused, setIsPaused] = useState(false)              // NEW: track pause state
-  const [displaySurface, setDisplaySurface] = useState(null)   // NEW: "monitor" | "window" | "browser"
+  const [isPaused, setIsPaused] = useState(false)              // track pause state
+  const [displaySurface, setDisplaySurface] = useState(null)   // "monitor" | "window" | "browser"
   const [screenSize, setScreenSize] = useState({ w: 1920, h: 1080 })
 
   const videoRef = useRef(null)
@@ -33,6 +33,11 @@ export default function ScreenCapture({ onReady }) {
   }
 
   useEffect(() => { onReady && onReady({ captureFrame }) }, [onReady])
+
+  // NEW: tiny helper to notify others (e.g., Controls) about share status changes
+  const emitShare = (detail) => {
+    try { window.dispatchEvent(new CustomEvent('screenshare:change', { detail })) } catch {}
+  }
 
   async function captureFrame() {
     const v = videoRef.current
@@ -143,20 +148,20 @@ export default function ScreenCapture({ onReady }) {
     } catch {
       setDisplaySurface(null)
     }
-    track.onmute = () => setIsPaused(true)
-    track.onunmute = () => setIsPaused(false)
+    track.onmute = () => { setIsPaused(true);  emitShare({ isSharing: true, isPaused: true, displaySurface }) }
+    track.onunmute = () => { setIsPaused(false); emitShare({ isSharing: true, isPaused: false, displaySurface }) }
     track.onended = () => {
       setIsSharing(false)
       setIsPaused(false)
       setDisplaySurface(null)
       currentTrackRef.current = null
+      emitShare({ isSharing: false, reason: 'ended' }) // NEW: notify app to stop capture
     }
   }
 
   // Start screen sharing
   const startScreenShare = async () => {
     try {
-      // Note: we cannot *force* monitor capture; the picker is user controlled.
       const stream = await navigator.mediaDevices.getDisplayMedia({
         video: { frameRate: 30 }, // keep it stable & compatible
         audio: false
@@ -171,6 +176,7 @@ export default function ScreenCapture({ onReady }) {
       })
       setScreenSize({ w: v.videoWidth || 1920, h: v.videoHeight || 1080 })
       setIsSharing(true)
+      emitShare({ isSharing: true, isPaused: false, displaySurface }) // NEW: announce start
 
       const [track] = stream.getVideoTracks()
       if (track) {
@@ -179,6 +185,7 @@ export default function ScreenCapture({ onReady }) {
     } catch (err) {
       console.error('Error sharing screen:', err)
       setIsSharing(false)
+      emitShare({ isSharing: false, reason: 'getDisplayMedia_error' }) // NEW
     }
   }
 
@@ -191,6 +198,7 @@ export default function ScreenCapture({ onReady }) {
     setIsPaused(false)
     setDisplaySurface(null)
     currentTrackRef.current = null
+    emitShare({ isSharing: false, reason: 'manual_stop' }) // NEW
   }
 
   // Switch source quickly (re-open picker)
