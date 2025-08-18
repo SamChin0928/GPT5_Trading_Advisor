@@ -4,6 +4,53 @@ import ROISelector from './ROISelector'
 import { Monitor, Share2, StopCircle, Settings, AlertTriangle, Info } from 'lucide-react'
 import { api } from '../lib/api'
 
+// ---- Helper: compute displayed video rect (handles object-contain letterboxing)
+function computeVideoRect(containerEl, videoEl) {
+  if (!containerEl || !videoEl) return null
+
+  const box = containerEl.getBoundingClientRect()
+  const boxW = box.width
+  const boxH = box.height
+
+  const vw = videoEl.videoWidth || 0
+  const vh = videoEl.videoHeight || 0
+  if (!vw || !vh || !boxW || !boxH) return null
+
+  const arVideo = vw / vh
+  const arBox = boxW / boxH
+
+  let dispW, dispH, offsetX, offsetY
+  if (arVideo > arBox) {
+    // fills width, bars top/bottom
+    dispW = boxW
+    dispH = boxW / arVideo
+    offsetX = 0
+    offsetY = (boxH - dispH) / 2
+  } else {
+    // fills height, bars left/right
+    dispH = boxH
+    dispW = boxH * arVideo
+    offsetY = 0
+    offsetX = (boxW - dispW) / 2
+  }
+
+  return {
+    x: offsetX,
+    y: offsetY,
+    width: dispW,
+    height: dispH,
+    vw,
+    vh,
+    toVideoX: (cssX) => (cssX - offsetX) / dispW * vw,
+    toVideoY: (cssY) => (cssY - offsetY) / dispH * vh,
+    toCSSX:   (vidX)  => (vidX / vw) * dispW + offsetX,
+    toCSSY:   (vidY)  => (vidY / vh) * dispH + offsetY,
+  }
+}
+
+// Toggle to show a green outline of the actual displayed video rect (for debugging)
+const DEBUG_VIDEO_RECT = false
+
 export default function ScreenCapture({ onReady }) {
   const [zones, setZones] = useState([])
   const [primaryId, setPrimaryId] = useState(null)
@@ -15,6 +62,7 @@ export default function ScreenCapture({ onReady }) {
   const videoRef = useRef(null)
   const containerRef = useRef(null)
   const currentTrackRef = useRef(null)
+  const videoGeomRef = useRef(null) // <--- NEW: displayed video rect + converters
 
   // ---- Persistence keys ----
   const LS_KEY_V2 = 'zones:single:v2'
@@ -38,6 +86,30 @@ export default function ScreenCapture({ onReady }) {
   const emitShare = (detail) => {
     try { window.dispatchEvent(new CustomEvent('screenshare:change', { detail })) } catch {}
   }
+
+  // --- NEW: keep displayed video rect fresh
+  function refreshVideoGeom() {
+    if (!containerRef.current || !videoRef.current) return
+    videoGeomRef.current = computeVideoRect(containerRef.current, videoRef.current)
+  }
+
+  useEffect(() => {
+    // refresh when layout changes
+    const onResize = () => requestAnimationFrame(refreshVideoGeom)
+    window.addEventListener('resize', onResize)
+
+    // periodic safety refresh while sharing (cheap)
+    const id = setInterval(() => {
+      if (isSharing) refreshVideoGeom()
+    }, 250)
+
+    // first pass
+    refreshVideoGeom()
+    return () => {
+      window.removeEventListener('resize', onResize)
+      clearInterval(id)
+    }
+  }, [isSharing])
 
   async function captureFrame() {
     const v = videoRef.current
@@ -155,7 +227,8 @@ export default function ScreenCapture({ onReady }) {
       setIsPaused(false)
       setDisplaySurface(null)
       currentTrackRef.current = null
-      emitShare({ isSharing: false, reason: 'ended' }) // NEW: notify app to stop capture
+      videoGeomRef.current = null // NEW: clear geometry
+      emitShare({ isSharing: false, reason: 'ended' })
     }
   }
 
@@ -163,7 +236,7 @@ export default function ScreenCapture({ onReady }) {
   const startScreenShare = async () => {
     try {
       const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: { frameRate: 30 }, // keep it stable & compatible
+        video: { frameRate: 30 },
         audio: false
       })
       const v = videoRef.current
@@ -176,7 +249,8 @@ export default function ScreenCapture({ onReady }) {
       })
       setScreenSize({ w: v.videoWidth || 1920, h: v.videoHeight || 1080 })
       setIsSharing(true)
-      emitShare({ isSharing: true, isPaused: false, displaySurface }) // NEW: announce start
+      refreshVideoGeom() // NEW: compute geometry right after stream is ready
+      emitShare({ isSharing: true, isPaused: false, displaySurface })
 
       const [track] = stream.getVideoTracks()
       if (track) {
@@ -185,7 +259,7 @@ export default function ScreenCapture({ onReady }) {
     } catch (err) {
       console.error('Error sharing screen:', err)
       setIsSharing(false)
-      emitShare({ isSharing: false, reason: 'getDisplayMedia_error' }) // NEW
+      emitShare({ isSharing: false, reason: 'getDisplayMedia_error' })
     }
   }
 
@@ -198,12 +272,12 @@ export default function ScreenCapture({ onReady }) {
     setIsPaused(false)
     setDisplaySurface(null)
     currentTrackRef.current = null
-    emitShare({ isSharing: false, reason: 'manual_stop' }) // NEW
+    videoGeomRef.current = null // NEW
+    emitShare({ isSharing: false, reason: 'manual_stop' })
   }
 
   // Switch source quickly (re-open picker)
   const switchSource = async () => {
-    // Stop old track cleanly first (prevents "already capturing" quirks on some browsers)
     const old = videoRef.current?.srcObject
     if (old) old.getTracks().forEach(t => t.stop())
     await startScreenShare()
@@ -287,6 +361,7 @@ export default function ScreenCapture({ onReady }) {
               muted
               playsInline
               className="w-full h-full object-contain"
+              onLoadedMetadata={refreshVideoGeom} // NEW: recompute on metadata
               style={{ display: isSharing ? 'block' : 'none', maxWidth: '100%', maxHeight: '100%' }}
             />
 
@@ -303,6 +378,21 @@ export default function ScreenCapture({ onReady }) {
               </div>
             )}
 
+            {/* Optional debug outline of the true displayed video area */}
+            {DEBUG_VIDEO_RECT && isSharing && videoGeomRef.current && (
+              <div
+                className="absolute pointer-events-none"
+                style={{
+                  zIndex: 8,
+                  left: videoGeomRef.current.x,
+                  top: videoGeomRef.current.y,
+                  width: videoGeomRef.current.width,
+                  height: videoGeomRef.current.height,
+                  border: '2px solid rgba(16,185,129,.7)'
+                }}
+              />
+            )}
+
             {/* Overlay only while sharing */}
             {isSharing && (
               <div className="absolute inset-0" style={{ zIndex: 10 }}>
@@ -315,6 +405,7 @@ export default function ScreenCapture({ onReady }) {
                   overlayMode={true}
                   showBackground={false}
                   perf={true}
+                  videoGeom={videoGeomRef}  // NEW: pass displayed rect & converters
                 />
               </div>
             )}

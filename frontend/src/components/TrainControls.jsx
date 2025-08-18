@@ -4,24 +4,51 @@ import { api } from '../lib/api'
 import { Loader2 } from 'lucide-react'
 
 export default function TrainControls({ sessionId }) {
-  const [includeAll, setIncludeAll] = useState(false)
+  const [includeAll, setIncludeAll] = useState(true) // default to true when no global model yet
   const [running, setRunning] = useState(false)
   const [status, setStatus] = useState(null)     // object from /api/train/status
   const [jobSessions, setJobSessions] = useState(null) // sessions used for this run
   const timer = useRef(null)
 
+  // initial fetch of status (to know if a global model exists)
+  useEffect(() => {
+    let alive = true
+    ;(async () => {
+      try {
+        const s = await api.trainStatus(sessionId)
+        if (!alive) return
+        setStatus(s)
+        // if a global model exists, ensure the toggle is false (hidden anyway)
+        if (s?.global_model) setIncludeAll(false)
+      } catch {}
+    })()
+    return () => { alive = false }
+  }, [sessionId])
+
   // --- start training ---
   async function start() {
     setRunning(true)
-    setStatus({ status: 'running', stage: 'starting' })
+    setStatus(prev => ({ ...(prev || {}), status: 'running', stage: 'starting' }))
     try {
-      // include_all only; backend auto-tunes other params
       const res = await api.train(sessionId, { include_all: includeAll })
       setJobSessions(res?.sessions || null)
       poll() // begin polling loop
     } catch (e) {
       setRunning(false)
       setStatus({ status: 'error', error: e?.message || String(e) })
+    }
+  }
+
+  // --- reset global model ---
+  async function onReset() {
+    if (!confirm('Reset the global model? This will delete the existing model.')) return
+    try {
+      await api.modelReset()
+      // reflect state immediately in UI
+      setStatus({ status: 'idle', global_model: false })
+      setIncludeAll(true)
+    } catch (e) {
+      alert(e?.message || 'Failed to reset model')
     }
   }
 
@@ -36,6 +63,12 @@ export default function TrainControls({ sessionId }) {
           timer.current = setTimeout(tick, 1000)
         } else {
           setRunning(false)
+          // one extra refresh shortly after "done" so global_model flips true
+          if (s?.status === 'done') {
+            setTimeout(async () => {
+              try { setStatus(await api.trainStatus(sessionId)) } catch {}
+            }, 1200)
+          }
         }
       } catch (e) {
         setRunning(false)
@@ -76,6 +109,7 @@ export default function TrainControls({ sessionId }) {
   }, [status])
 
   const isRunning = status?.status === 'running' || running
+  const hasGlobal = !!status?.global_model
 
   return (
     <div className="rounded-2xl border border-slate-700/50 bg-slate-900/60 p-4 flex flex-col gap-3">
@@ -87,6 +121,18 @@ export default function TrainControls({ sessionId }) {
           <span className="text-[12px] text-slate-400 hidden sm:block">
             Tip: label at least <b>6</b> folders (global labels).
           </span>
+
+          {hasGlobal && (
+            <button
+              onClick={onReset}
+              disabled={isRunning}
+              className="px-3 py-2 rounded-lg text-sm bg-slate-800 hover:bg-slate-700 text-slate-200 border border-white/10 disabled:opacity-60"
+              title="Delete the global model"
+            >
+              Reset
+            </button>
+          )}
+
           <button
             onClick={start}
             disabled={isRunning}
@@ -100,22 +146,24 @@ export default function TrainControls({ sessionId }) {
                 <Loader2 className="w-4 h-4 animate-spin" />
                 Running…
               </span>
-            ) : 'Train'}
+            ) : (hasGlobal ? 'Update model' : 'Build model')}
           </button>
         </div>
       </div>
 
       {/* options row */}
-      <div className="flex items-center gap-3">
-        <label className="flex items-center gap-2 text-sm text-slate-300">
-          <input
-            type="checkbox"
-            checked={includeAll}
-            onChange={e => setIncludeAll(e.target.checked)}
-          />
-          Train on all sessions
-        </label>
-      </div>
+      {!hasGlobal && (
+        <div className="flex items-center gap-3">
+          <label className="flex items-center gap-2 text-sm text-slate-300">
+            <input
+              type="checkbox"
+              checked={includeAll}
+              onChange={e => setIncludeAll(e.target.checked)}
+            />
+            Train on all sessions
+          </label>
+        </div>
+      )}
 
       {/* sessions included */}
       {(status?.sessions?.length || jobSessions?.length) ? (

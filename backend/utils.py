@@ -8,49 +8,17 @@ from PIL import Image
 
 # --- Paths ---
 BASE_DIR = Path(__file__).resolve().parent
+
+# Sessions root (used by backend to locate session folders)
 DATA_DIR = BASE_DIR / "data" / "sessions"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-# global vocab (shared across sessions)
+# Global vocab (shared across sessions)
 LABELS_DIR = BASE_DIR / "data" / "labels"
 VOCAB_PATH = LABELS_DIR / "vocab.json"
+
+# Centralized annotations store (one file for all sessions)
 CENTRAL_ANN_PATH = BASE_DIR / "data" / "annotations.json"
-
-def _read_central_ann():
-    return read_json(CENTRAL_ANN_PATH, {})
-
-def _write_central_ann(obj):
-    write_json_atomic(CENTRAL_ANN_PATH, obj)
-
-def _load_session_ann_from_central(session_id: str) -> Dict[str, Dict]:
-    data = _read_central_ann()
-    sess = data.get(session_id)
-    return sess if isinstance(sess, dict) else {}
-
-def _save_session_ann_to_central(session_id: str, sess_map: Dict[str, Dict]):
-    data = _read_central_ann()
-    if sess_map and isinstance(sess_map, dict):
-        data[session_id] = sess_map
-    else:
-        # delete empty key
-        if session_id in data:
-            data.pop(session_id, None)
-    _write_central_ann(data)
-
-def ensure_session_dirs(session_id: str) -> Path:
-    """Create session folders lazily."""
-    sdir = DATA_DIR / session_id
-    (sdir / "captures").mkdir(parents=True, exist_ok=True)
-    (sdir / "mosaics").mkdir(parents=True, exist_ok=True)
-    (sdir / "model").mkdir(parents=True, exist_ok=True)
-    (sdir / "embeddings").mkdir(parents=True, exist_ok=True)  # for future pipeline
-    return sdir
-    
-def ensure_simple_dir(session_id: str) -> Path:
-    """Create only the session folder (no captures/mosaics/model subdirs)."""
-    sdir = DATA_DIR / session_id
-    sdir.mkdir(parents=True, exist_ok=True)
-    return sdir
 
 # ========== JSON helpers (atomic, tolerant) ==========
 
@@ -69,6 +37,49 @@ def write_json_atomic(path: Path, obj):
     tmp.write_text(json.dumps(obj, indent=2))
     tmp.replace(path)
 
+# ========== Central annotations helpers ==========
+
+def _read_central_ann() -> Dict[str, Dict]:
+    return read_json(CENTRAL_ANN_PATH, {})
+
+def _write_central_ann(obj: Dict[str, Dict]) -> None:
+    write_json_atomic(CENTRAL_ANN_PATH, obj)
+
+def _load_session_ann_from_central(session_id: str) -> Dict[str, Dict]:
+    data = _read_central_ann()
+    sess = data.get(session_id)
+    return sess if isinstance(sess, dict) else {}
+
+def _save_session_ann_to_central(session_id: str, sess_map: Dict[str, Dict]) -> None:
+    data = _read_central_ann()
+    if sess_map and isinstance(sess_map, dict):
+        data[session_id] = sess_map
+    else:
+        # delete empty key
+        if session_id in data:
+            data.pop(session_id, None)
+    _write_central_ann(data)
+
+# Public helpers used by main.py
+def save_session_annotations(session_id: str, sess_map: Dict[str, Dict]):
+    _save_session_ann_to_central(session_id, sess_map)
+
+# ========== Session folder helpers ==========
+
+def ensure_session_dirs(session_id: str) -> Path:
+    """Create session folders lazily."""
+    sdir = DATA_DIR / session_id
+    (sdir / "captures").mkdir(parents=True, exist_ok=True)
+    (sdir / "mosaics").mkdir(parents=True, exist_ok=True)
+    (sdir / "model").mkdir(parents=True, exist_ok=True)
+    (sdir / "embeddings").mkdir(parents=True, exist_ok=True)  # for future pipeline
+    return sdir
+    
+def ensure_simple_dir(session_id: str) -> Path:
+    """Create only the session folder (no captures/mosaics/model subdirs)."""
+    sdir = DATA_DIR / session_id
+    sdir.mkdir(parents=True, exist_ok=True)
+    return sdir
 
 # ========== Data-URL decode ==========
 
@@ -77,7 +88,6 @@ def decode_data_url_to_pil(data_url: str) -> Image.Image:
     header, b64 = data_url.split(",", 1)
     binary = base64.b64decode(b64)
     return Image.open(io.BytesIO(binary)).convert("RGB")
-
 
 # ========== Capture saving ==========
 
@@ -94,7 +104,6 @@ def save_zone_crops(session_dir: Path, timestamp: str, zone_ids: List[int], imag
         img.save(tdir / name, quality=92)
         rels.append(str(Path("captures") / str(timestamp) / name))
     return rels
-
 
 # ========== Mosaic builder ==========
 
@@ -115,7 +124,6 @@ def make_mosaic_horiz(images: List[Image.Image], pad: int = 4, bg=(20,20,20)) ->
         x += im.width + pad
     return mosaic
 
-
 # ========== Group index (per session) ==========
 
 def _default_role_for(zid: int) -> str:
@@ -133,6 +141,9 @@ def upsert_group_entry(
     """
     Ensure a group entry exists/updated for this timestamp.
     Merge zones by id; update role/path; keep groups sorted by timestamp.
+    Note: timestamps here are numeric (per real session). Merged training sessions
+    build their own index and may use non-numeric composite timestamps; this
+    function is not used for merged sessions.
     """
     gi_path = session_dir / "group_index.json"
     index = read_json(gi_path, {"session_id": session_dir.name, "groups": []})
@@ -170,11 +181,10 @@ def upsert_group_entry(
         if tz:
             grp["tz"] = tz
 
-    # sort by timestamp
+    # sort by timestamp (numeric sessions only)
     index["groups"].sort(key=lambda g: int(g["timestamp"]))
     write_json_atomic(gi_path, index)
     return grp
-
 
 # ========== Label vocab (global, user-driven) ==========
 
@@ -199,39 +209,6 @@ def add_label_to_vocab(name: str, parent: Optional[str] = None) -> Dict:
     vocab["labels"].append(entry)
     write_json_atomic(VOCAB_PATH, vocab)
     return entry
-
-
-# ========== Annotations (per session, group-level) ==========
-
-def load_annotations(session_dir: Path) -> Dict[str, Dict]:
-    return read_json(session_dir/"annotations.json", {})
-
-def upsert_annotation(
-    session_dir: Path,
-    timestamp: str | int,
-    global_labels: Optional[List[str]],
-    by_role: Optional[Dict[str, List[str]]],
-    notes: Optional[str] = None
-) -> Dict:
-    ann_path = session_dir/"annotations.json"
-    ann = load_annotations(session_dir)
-    ts = str(int(str(timestamp)))
-    rec = ann.get(ts, {})
-    if global_labels is not None:
-        # dedupe while preserving order
-        seen = set()
-        rec["global"] = [x for x in global_labels if not (x in seen or seen.add(x))]
-    if by_role is not None:
-        brec = {}
-        for k, vals in by_role.items():
-            seen = set()
-            brec[k] = [x for x in vals if not (x in seen or seen.add(x))]
-        rec["by_role"] = brec
-    if notes is not None:
-        rec["notes"] = notes
-    ann[ts] = rec
-    write_json_atomic(ann_path, ann)
-    return rec
 
 # ========== Annotations (CENTRAL, group-level) ==========
 
@@ -280,6 +257,28 @@ def upsert_annotation(
     _save_session_ann_to_central(session_id, ann)
     return rec
 
-# (OPTIONAL public helper used by main.py deletions)
-def save_session_annotations(session_id: str, sess_map: Dict[str, Dict]):
-    _save_session_ann_to_central(session_id, sess_map)
+def set_model_suggestion(session_dir: Path, timestamp: str | int, suggestion: Dict):
+    """
+    Non-destructively attach the model's suggestion to the central annotations
+    for this session + timestamp.
+
+    `suggestion` should look like:
+      {
+        "top": "<label_id>",
+        "probs": {"label_id": float, ...},
+        "ts": <unix_ms>  # optional, when the prediction was made
+      }
+
+    This preserves existing keys such as "global", "by_role", and "notes".
+    Returns the updated annotation record for that timestamp.
+    """
+    session_id = session_dir.name
+    ann = load_annotations(session_dir)
+    ts = str(int(str(timestamp)))
+
+    rec = dict(ann.get(ts, {}))
+    rec["model"] = dict(suggestion) if isinstance(suggestion, dict) else {"value": suggestion}
+    ann[ts] = rec
+
+    _save_session_ann_to_central(session_id, ann)
+    return rec

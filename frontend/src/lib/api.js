@@ -1,7 +1,7 @@
 // lib/api.js
 
 // Resolve base: env (VITE_API_BASE) or '' for relative (use Vite proxy)
-const RAW  = import.meta?.env?.VITE_API_BASE?.trim?.()
+const RAW = import.meta?.env?.VITE_API_BASE?.trim?.()
 export const BASE = RAW ? RAW.replace(/\/+$/, '') : ''
 
 const DEFAULT_TIMEOUT = 20000
@@ -38,17 +38,21 @@ async function handle(res) {
   return data
 }
 
-// NEW: no-store by default to avoid cached GETs (e.g., /api/train/status)
-function req(path, { method = 'GET', query, json, form, headers, signal, timeout = DEFAULT_TIMEOUT, cache = 'no-store' } = {}) {
+function req(
+  path,
+  { method = 'GET', query, json, form, headers, signal, timeout = DEFAULT_TIMEOUT } = {}
+) {
   const url = join(BASE, path) + toQuery(query)
   const ctrl = new AbortController()
-  const timer = setTimeout(() => ctrl.abort(new DOMException('Request timeout', 'AbortError')), timeout)
+  const timer = setTimeout(
+    () => ctrl.abort(new DOMException('Request timeout', 'AbortError')),
+    timeout
+  )
 
   const init = {
     method,
     headers: { Accept: 'application/json', ...(headers || {}) },
     signal: signal || ctrl.signal,
-    cache, // <--- important for status polling
   }
 
   if (json !== undefined) {
@@ -58,10 +62,60 @@ function req(path, { method = 'GET', query, json, form, headers, signal, timeout
     init.body = form // let browser set content-type boundary
   }
 
-  // Add explicit header for proxies that ignore Request.cache
-  if (method === 'GET') init.headers['Cache-Control'] = 'no-store'
-
   return fetch(url, init).then(handle).finally(() => clearTimeout(timer))
+}
+
+// ---- Realtime helpers (SSE + compatibility pings) ----
+const notifyUpdate = (type, detail = {}) => {
+  // For components already listening (Labeler.jsx), we keep these signals:
+  try {
+    window.dispatchEvent(
+      new CustomEvent('captures:updated', { detail: { type, ...detail, at: Date.now() } })
+    )
+  } catch {}
+  try {
+    localStorage.setItem('captures_updated_at', String(Date.now()))
+  } catch {}
+}
+
+let _es = null
+export const realtime = {
+  start() {
+    if (typeof window === 'undefined' || _es) return _es
+    const url = join(BASE, '/api/events')
+    try {
+      _es = new EventSource(url)
+    } catch (e) {
+      console.warn('EventSource init failed:', e)
+      return null
+    }
+    // Default "message" handler (server sends JSON in data)
+    _es.onmessage = (e) => {
+      if (!e?.data) return
+      try {
+        const evt = JSON.parse(e.data)
+        const t = evt?.type
+        // Only react to relevant mutations
+        if (t === 'capture' ||
+            t === 'consolidated' ||
+            t === 'annotation_saved' ||
+            t === 'group_deleted' ||
+            t === 'image_deleted') {
+          notifyUpdate(t, evt)
+        }
+      } catch {}
+    }
+    // Optional: greet/keepalive events
+    _es.addEventListener('hello', () => {})
+    _es.onerror = () => {
+      // EventSource auto-reconnects; nothing to do.
+    }
+    return _es
+  },
+  stop() {
+    try { _es?.close() } catch {}
+    _es = null
+  },
 }
 
 // Build a safe image URL for a file relative to a session folder
@@ -72,15 +126,17 @@ const sessionImageUrl = (session_id, relPath) => {
   return join(BASE, `${DATA_PREFIX}/sessions/${encodeURIComponent(session_id)}/${safe}`)
 }
 
+// Wrap single-image delete helper so it also pings listeners
 const deleteGroupImage = (session_id, timestamp, pathOrFilename) => {
   const s = String(pathOrFilename || '')
   const hasSlash = s.includes('/')
-  return hasSlash
-    ? req('/api/group/delete_image', { method: 'POST', json: { session_id, timestamp, path: s } })
-    : req('/api/group/delete_image', { method: 'POST', json: { session_id, timestamp, filename: s } })
+  const payload = hasSlash
+    ? { session_id, timestamp, path: s }
+    : { session_id, timestamp, filename: s }
+  return req('/api/group/delete_image', { method: 'POST', json: payload })
+    .then((r) => { notifyUpdate('image_deleted', { session_id, timestamp }); return r })
 }
 
-// Export the API functions
 export const api = {
   // ---- health ----
   health: () => req('/api/health'),
@@ -94,10 +150,12 @@ export const api = {
 
   // ---- ingest / consolidate / mosaics ----
   ingest: (payload) =>
-    req('/api/ingest', { method: 'POST', json: payload }),
+    req('/api/ingest', { method: 'POST', json: payload })
+      .then((r) => { notifyUpdate('capture', { session_id: payload.session_id, timestamp: payload.timestamp }); return r }),
 
   consolidate: (session_id) =>
-    req('/api/consolidate', { method: 'POST', json: { session_id } }),
+    req('/api/consolidate', { method: 'POST', json: { session_id } })
+      .then((r) => { notifyUpdate('consolidated', { session_id }); return r }),
 
   mosaics: (session_id) =>
     req('/api/mosaics', { query: { session_id } }),
@@ -109,13 +167,13 @@ export const api = {
   train: (session_id, params) =>
     req('/api/train', { method: 'POST', json: { session_id, ...params } }),
 
-  // NEW: add cache-buster for status polling to be extra safe
   trainStatus: (session_id) =>
-    req('/api/train/status', {
-      query: { session_id, t: Date.now() }, // bust any intermediary caches
-      timeout: 15000
-    }),
+    req('/api/train/status', { query: { session_id } }),
 
+  // reset global model
+  modelReset: () => req('/api/model/reset', { method: 'POST' }),
+
+  // ---- prediction ----
   predict: (session_id, blob) => {
     const fd = new FormData()
     fd.append('session_id', session_id)
@@ -123,23 +181,31 @@ export const api = {
     return req('/api/predict', { method: 'POST', query: { session_id }, form: fd })
   },
 
+  // Global heads/group prediction (timestamp optional; backend picks latest if omitted)
+  predictGroup: (session_id, timestamp) =>
+    req('/api/predict_group', { query: { session_id, ...(timestamp ? { timestamp } : {}) } }),
+
   // ---- vocab / groups / annotations ----
   getVocab: () => req('/api/labels/vocab'),
   createVocabLabel: (name, parent) =>
     req('/api/labels/vocab', { method: 'POST', json: { name, parent } }),
 
   // Single-session groups (include ann + labeled from backend)
-  groups: (session_id) =>
-    req('/api/groups', { query: { session_id } }),
+  groups: (session_id, includePred = true) =>
+    req('/api/groups', { query: { session_id, include_pred: includePred ? 1 : 0 } }),
 
   // All sessions (set onlyUnlabeled=true to fetch only unlabeled)
-  groupsAll: (onlyUnlabeled = false) =>
-    req('/api/groups_all', { query: { only_unlabeled: onlyUnlabeled ? 1 : 0 } }),
+  groupsAll: (onlyUnlabeled = false, includePred = true) =>
+    req('/api/groups_all', {
+      query: { only_unlabeled: onlyUnlabeled ? 1 : 0, include_pred: includePred ? 1 : 0 },
+    }),
 
-  annotate: (session_id, { timestamp, global_labels, by_role, notes }) =>
-    req('/api/annotate', { method: 'POST', json: { session_id, timestamp, global_labels, by_role, notes } }),
+  // Allow model_feedback (and future fields) to pass through unchanged
+  annotate: (session_id, payload) =>
+    req('/api/annotate', { method: 'POST', json: { session_id, ...payload } })
+      .then((r) => { notifyUpdate('annotation_saved', { session_id, timestamp: payload.timestamp }); return r }),
 
-  // ---- annotations (API only, centralized) ----
+  // Centralized annotations slice for a session
   annotations: async (session_id) => {
     try {
       const data = await req('/api/annotations', { query: { session_id }, timeout: 10000 })
@@ -150,35 +216,34 @@ export const api = {
     }
   },
 
-  // ---- deletion helpers (NEW) ----
-  /**
-   * Delete an entire timestamp folder (captures + mosaic) and prune indexes.
-   */
+  // ---- deletion helpers ----
   deleteGroup: (session_id, timestamp) =>
-    req('/api/group/delete', { method: 'POST', json: { session_id, timestamp } }),
+    req('/api/group/delete', { method: 'POST', json: { session_id, timestamp } })
+      .then((r) => { notifyUpdate('group_deleted', { session_id, timestamp }); return r }),
 
-  /**
-   * Delete a single image inside captures/<timestamp>.
-   * Pass either a full relative path (preferred) or just the filename.
-   * Example path: "captures/1723567890000/zone_1.jpg"
-   */
   deleteGroupImageByPath: (session_id, timestamp, path) =>
-    req('/api/group/delete_image', { method: 'POST', json: { session_id, timestamp, path } }),
+    req('/api/group/delete_image', { method: 'POST', json: { session_id, timestamp, path } })
+      .then((r) => { notifyUpdate('image_deleted', { session_id, timestamp }); return r }),
 
   deleteGroupImageByFilename: (session_id, timestamp, filename) =>
-    req('/api/group/delete_image', { method: 'POST', json: { session_id, timestamp, filename } }),
+    req('/api/group/delete_image', { method: 'POST', json: { session_id, timestamp, filename } })
+      .then((r) => { notifyUpdate('image_deleted', { session_id, timestamp }); return r }),
 
-  deleteGroupImage, // <-- ensure this is exported
+  deleteGroupImage,
 
   deleteSession: (session_id) =>
-    req('/api/session/delete', { method: 'POST', json: { session_id } }),
+    req('/api/session/delete', { method: 'POST', json: { session_id } })
+      .then((r) => { notifyUpdate('session_deleted', { session_id }); return r }),
 
-  // ---- evaluation & group prediction (NEW) ----
-  evalHeads: (session_id) =>
-    req('/api/eval', { query: { session_id } }),
+  // ---- model info & (optional) suggestion upsert ----
+  modelInfo: () => req('/api/model/info'),
 
-  predictGroup: (session_id, timestamp) =>
-    req('/api/predict_group', { query: { session_id, ...(timestamp ? { timestamp } : {}) } }),
+  // If you keep the endpoint from the cleaned backend to persist model suggestions:
+  saveModelSuggestion: (session_id, timestamp, suggestion) =>
+    req('/api/annotations/model_suggestion', {
+      method: 'POST',
+      json: { session_id, timestamp, suggestion },
+    }),
 
   // Expose the image URL builder
   imageUrl: sessionImageUrl,

@@ -13,10 +13,13 @@ export default function Controls({ sessionId, zones, primaryId, captureHandle, o
   const inFlight   = useRef(false)
   const stoppedRef = useRef(true)
 
+  // SYNC-TO-MINUTE: track the next *wall-clock* capture time (ms since epoch)
+  const nextAtRef  = useRef(null)
+
   // listen for ScreenCapture share status
   useEffect(() => {
     const onShare = (e) => {
-      const { isSharing } = e.detail || {}
+      const { isSharing } = (e?.detail) || {}
       setSharing(!!isSharing)
       // auto-stop if sharing ended while recording
       if (!isSharing) stop()
@@ -27,6 +30,12 @@ export default function Controls({ sessionId, zones, primaryId, captureHandle, o
 
   // graceful unmount
   useEffect(() => () => stop(), [])
+
+  // If interval changes while running, re-align to the next grid tick
+  useEffect(() => {
+    if (!running) return
+    alignAndScheduleNext()
+  }, [intervalMin, running])
 
   // Resolve capture handle (ref or direct object)
   function resolveHandle() {
@@ -103,6 +112,12 @@ export default function Controls({ sessionId, zones, primaryId, captureHandle, o
     return Math.round(m * 60 * 1000)
   }
 
+  // SYNC-TO-MINUTE: compute the next capture time aligned to the interval grid
+  function computeNextAlignedTime(fromMs) {
+    const interval = getIntervalMs()               // multiple of 60_000
+    return Math.ceil(fromMs / interval) * interval // next multiple from epoch (minute-aligned)
+  }
+
   function start() {
     // NEW GUARD: do not start if not sharing
     if (!sharing) {
@@ -119,7 +134,7 @@ export default function Controls({ sessionId, zones, primaryId, captureHandle, o
     }
     stoppedRef.current = false
     setRunning(true)
-    scheduleNext(0)
+    alignAndScheduleNext() // SYNC-TO-MINUTE: first shot at exact boundary
   }
 
   function stop() {
@@ -129,6 +144,26 @@ export default function Controls({ sessionId, zones, primaryId, captureHandle, o
       clearTimeout(timerRef.current)
       timerRef.current = null
     }
+    nextAtRef.current = null
+  }
+
+  // SYNC-TO-MINUTE: schedule next run based on nextAtRef
+  function alignAndScheduleNext() {
+    const now = Date.now()
+    // If we already have a target (e.g., resume after changing interval), re-align forward
+    let target = nextAtRef.current
+    const interval = getIntervalMs()
+    if (!target) {
+      // first alignment: next grid tick (e.g., 09:52:00.000 if now is 09:51:52)
+      target = computeNextAlignedTime(now)
+    } else {
+      // ensure target is still in the future for the (possibly) new interval
+      // move forward to the next multiple of the new interval that is >= now
+      const missed = Math.max(0, Math.ceil((now - target) / interval))
+      target = target + missed * interval
+    }
+    nextAtRef.current = target
+    scheduleNext(Math.max(0, target - now))
   }
 
   function scheduleNext(delayMs) {
@@ -141,6 +176,9 @@ export default function Controls({ sessionId, zones, primaryId, captureHandle, o
     if (stoppedRef.current || inFlight.current) return
     inFlight.current = true
 
+    // Guard: if somehow triggered early/late, keep captures stamped to the planned boundary
+    const plannedAt = nextAtRef.current || computeNextAlignedTime(Date.now())
+
     try {
       const handle = resolveHandle()
       if (!handle || typeof handle.captureFrame !== 'function') {
@@ -150,7 +188,7 @@ export default function Controls({ sessionId, zones, primaryId, captureHandle, o
       }
 
       const frame = await handle.captureFrame()
-      if (!frame) { scheduleNext(getIntervalMs()); return }
+      if (!frame) { finalizeAndPlanNext(); return }
 
       const {
         bmp, w, h, view,
@@ -158,7 +196,7 @@ export default function Controls({ sessionId, zones, primaryId, captureHandle, o
         primaryId: framePrimaryId
       } = frame
 
-      if (!bmp || !w || !h) { scheduleNext(getIntervalMs()); return }
+      if (!bmp || !w || !h) { finalizeAndPlanNext(); return }
 
       // Prefer parent zones; fallback to zones captured with the frame
       let zonesForUse = getValidZones()
@@ -176,8 +214,10 @@ export default function Controls({ sessionId, zones, primaryId, captureHandle, o
       }
 
       if (images.length > 0) {
-        const timestamp = String(Date.now())
-        await api.ingest({ session_id: sessionId, timestamp, zone_ids, images })
+        // EXACT-MINUTE-TS: stamp the folder with the *boundary* time, not "now"
+        const timestamp = String(plannedAt)
+        const tz = Intl.DateTimeFormat().resolvedOptions().timeZone
+        await api.ingest({ session_id: sessionId, timestamp, zone_ids, images, tz })
       }
 
       // Optional: live prediction for primary zone
@@ -200,8 +240,22 @@ export default function Controls({ sessionId, zones, primaryId, captureHandle, o
       console.error('Loop error:', err)
     } finally {
       inFlight.current = false
-      if (!stoppedRef.current) scheduleNext(getIntervalMs())
+      finalizeAndPlanNext()
     }
+  }
+
+  // SYNC-TO-MINUTE: move nextAt forward exactly one interval (catching up if needed)
+  function finalizeAndPlanNext() {
+    if (stoppedRef.current) return
+    const interval = getIntervalMs()
+    const now = Date.now()
+    let nextAt = (nextAtRef.current || computeNextAlignedTime(now)) + interval
+    if (nextAt <= now) {
+      const missed = Math.floor((now - nextAt) / interval) + 1
+      nextAt += missed * interval
+    }
+    nextAtRef.current = nextAt
+    scheduleNext(Math.max(0, nextAt - now))
   }
 
   return (

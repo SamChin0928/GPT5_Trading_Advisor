@@ -2,12 +2,13 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Any
 import json
 import random
 import math
 import pickle
-import os  # NEW
+import os
+import re
 import numpy as np
 from PIL import Image
 
@@ -31,11 +32,11 @@ from .utils import read_json, write_json_atomic, load_annotations as load_ann
 
 @dataclass
 class TrainConfig:
-    session_dir: Path
+    session_dir: Path                 # directory that contains group_index.json + images (can be a merged workspace)
     epochs: int = 5
     lr: float = 1e-3
     batch_size: int = 16
-    val_split: float = 0.2
+    val_split: float = 0.2            # legacy CNN only
 
 
 # -------------------------
@@ -74,6 +75,39 @@ def _best_threshold(y_true: np.ndarray, y_prob: np.ndarray) -> Tuple[float, floa
         if f1 > best_f1:
             best_f1, best_t = f1, float(t)
     return best_t, best_f1
+
+
+# -------------------------
+# Utility: robust timestamp parsing
+# -------------------------
+
+_DIGITS = re.compile(r"(\d{10,17})")
+
+def _ts_to_int_maybe(ts_val) -> int:
+    """
+    Accept plain millisecond ints/strings, or composite strings like 'SID__1691234567890'.
+    If nothing parseable is found, return 0.
+    """
+    s = str(ts_val)
+    # common case: '1234567890123'
+    try:
+        return int(s)
+    except Exception:
+        pass
+    # composite 'SID__1234567890123'
+    if "__" in s:
+        try:
+            return int(s.split("__")[-1])
+        except Exception:
+            pass
+    # last resort: find a long digit run
+    m = _DIGITS.search(s)
+    if m:
+        try:
+            return int(m.group(1))
+        except Exception:
+            pass
+    return 0
 
 
 # -------------------------
@@ -232,7 +266,6 @@ def _load_backbone():
             m = models.efficientnet_b0(weights=models.EfficientNet_B0_Weights.DEFAULT)
             pretrained = True
         except Exception:
-            # Offline or cache missing: fall back immediately
             m = models.efficientnet_b0(weights=None)
             pretrained = False
     else:
@@ -299,7 +332,8 @@ def _group_vector(session_dir: Path, g: Dict, roles: List[str], feat_dim: int, b
             vecs.append(_embed_image(backbone, tf, p))
         else:
             vecs.append(np.zeros((feat_dim,), dtype=np.float32))
-    tfeat = _time_features(int(g["timestamp"]))
+    ts_ms = _ts_to_int_maybe(g.get("timestamp"))
+    tfeat = _time_features(int(ts_ms))
     return np.concatenate([*vecs, tfeat], axis=0)
 
 
@@ -343,7 +377,7 @@ def _train_heads(Xtr: np.ndarray, Ytr: np.ndarray, Xva: np.ndarray, Yva: np.ndar
             models[lid] = ("lgb", booster.dump_model())
             # Threshold using validation predictions
             pva = booster.predict(Xva)
-            thr, f1 = _best_threshold(yva, pva)
+            thr, _ = _best_threshold(yva, pva)
             thresholds[lid] = float(thr)
         out["type"] = "lightgbm_dump"
         out["models"] = models
@@ -363,7 +397,7 @@ def _train_heads(Xtr: np.ndarray, Ytr: np.ndarray, Xva: np.ndarray, Yva: np.ndar
                     return float((a@b)/(na*nb))
                 sims = np.array([_cos(x, c) for x in Xva], dtype=np.float32)
                 prob = (sims + 1.0) / 2.0
-                thr, f1 = _best_threshold(Yva[:, i], prob)
+                thr, _ = _best_threshold(Yva[:, i], prob)
                 thresholds[lid] = float(thr)
             else:
                 centroids[lid] = None
@@ -519,6 +553,8 @@ def _get_group_by_ts(session_dir: Path, ts: str) -> Optional[Dict]:
     return None
 
 def _rehydrate_booster(dump) -> "lgb.Booster":
+    if lgb is None:
+        raise RuntimeError("LightGBM heads present but LightGBM is not installed.")
     return lgb.Booster(model_str=json.dumps(dump))  # type: ignore
 
 def predict_group_probs(session_dir: Path, timestamp: str) -> Dict[str, float]:
@@ -618,3 +654,227 @@ def evaluate_session(session_dir: Path) -> Dict:
         "thresholds": thresholds,
         "labels": heads["label_ids"]
     }
+
+# --------- Incremental updates (optional, non-breaking) ---------
+
+_INC_STATE = "inc_state.json"  # sidecar to keep counts etc.
+
+def _heads_file(heads_dir: Path) -> Path:
+    return heads_dir / "heads.pkl"
+
+def _state_file(heads_dir: Path) -> Path:
+    return heads_dir / _INC_STATE
+
+def _load_heads_dict(heads_dir: Path) -> Optional[Dict[str, Any]]:
+    p = _heads_file(heads_dir)
+    if not p.exists():
+        return None
+    with open(p, "rb") as f:
+        return pickle.load(f)
+
+def _save_heads_dict(heads_dir: Path, heads: Dict[str, Any]) -> None:
+    with open(_heads_file(heads_dir), "wb") as f:
+        pickle.dump(heads, f)
+
+def _load_inc_state(heads_dir: Path) -> Dict[str, Any]:
+    p = _state_file(heads_dir)
+    try:
+        if p.exists():
+            return json.loads(p.read_text())
+    except Exception:
+        pass
+    return {"counts": {}}  # label_id -> int
+
+def _save_inc_state(heads_dir: Path, st: Dict[str, Any]) -> None:
+    _state_file(heads_dir).write_text(json.dumps(st, indent=2))
+
+def _cos01(a: np.ndarray, b: np.ndarray) -> float:
+    na = float(np.linalg.norm(a) + 1e-9)
+    nb = float(np.linalg.norm(b) + 1e-9)
+    return float((np.dot(a, b) / (na * nb) + 1.0) / 2.0)
+
+def _derive_pred_sets_from_feedback(feedback: Optional[Dict[str, Any]],
+                                    thresholds: Dict[str, float]) -> Tuple[set, Dict[str, float]]:
+    """
+    Returns (pred_pos, score_by_label) using feedback['global']['pred'] if present.
+    Fallback: empty sets.
+    """
+    pred_pos = set()
+    score_map = {}
+    try:
+        g = (feedback or {}).get("global") or {}
+        preds = g.get("pred") or []  # [["lid", score], ...]
+        for item in preds:
+            if isinstance(item, (list, tuple)) and len(item) >= 2:
+                lid = str(item[0])
+                s = float(item[1])
+                score_map[lid] = s
+                if s >= float(thresholds.get(lid, 0.5)):
+                    pred_pos.add(lid)
+    except Exception:
+        pass
+    return pred_pos, score_map
+
+def incremental_update_from_annotation(
+    session_dir: Path,
+    timestamp: str | int,
+    positive_labels: List[str],
+    feedback: Optional[Dict[str, Any]] = None,
+    heads_dir: Optional[Path] = None,
+    alpha_threshold: float = 0.06,
+) -> Optional[Dict[str, Any]]:
+    """
+    Incrementally update heads with a single labeled group:
+      - If heads type is 'prototypes': update label centroids with a running mean.
+      - For ALL types: gently adapt per-label thresholds using EMA and feedback.
+
+    Args:
+        session_dir: the session that contains images/group_index for this timestamp
+        timestamp: group timestamp
+        positive_labels: authoritative labels saved by the user (global labels)
+        feedback: optional model_feedback blob (from annotate payload)
+        heads_dir: directory that contains heads.pkl (e.g., GLOBAL heads) — REQUIRED by caller
+        alpha_threshold: EMA rate for threshold adaptation
+
+    Returns:
+        Updated heads dict, or None if heads not found.
+    """
+    # Resolve heads dir/file
+    if heads_dir is None:
+        heads_dir = session_dir / "model"
+    heads = _load_heads_dict(heads_dir)
+    if heads is None:
+        return None
+
+    label_ids: List[str] = list(heads.get("label_ids") or [])
+    thresholds: Dict[str, float] = dict(heads.get("thresholds") or {})
+    roles: List[str] = list(heads.get("roles") or [])
+
+    # Find group & compute vector
+    g = _get_group_by_ts(session_dir, str(timestamp))
+    if not g:
+        return None
+    backbone, tf, feat_dim, _ = _load_backbone()
+    x = _group_vector(session_dir, g, roles, feat_dim, backbone, tf)
+    x = x.astype(np.float32, copy=False)
+    x_norm = x / (np.linalg.norm(x) + 1e-9)
+
+    # Prepare feedback-derived sets
+    pred_pos_from_fb, score_from_fb = _derive_pred_sets_from_feedback(feedback, thresholds)
+    truth = set(map(str, positive_labels))
+
+    # --- Prototype centroid update (running mean on normalized vectors) ---
+    st = _load_inc_state(heads_dir)
+    if heads.get("type") in ("prototypes", "proto"):
+        models = heads.get("models") or {}
+        # make numpy views
+        np_models: Dict[str, Optional[np.ndarray]] = {}
+        for lid in set(label_ids) | truth:
+            v = models.get(lid, None)
+            np_models[lid] = (None if v is None else np.asarray(v, dtype=np.float32))
+
+        # register new labels if needed
+        for lid in truth:
+            if lid not in label_ids:
+                label_ids.append(lid)
+                np_models[lid] = None
+                thresholds[lid] = thresholds.get(lid, 0.5)
+
+        # running mean for positives
+        for lid in truth:
+            n = int(st["counts"].get(lid, 0))
+            c = np_models[lid]
+            if c is None or n <= 0:
+                np_models[lid] = x_norm.copy()
+                st["counts"][lid] = 1
+            else:
+                new_c = (c * n + x_norm) / (n + 1.0)
+                new_c = new_c / (np.linalg.norm(new_c) + 1e-9)
+                np_models[lid] = new_c
+                st["counts"][lid] = n + 1
+
+        # write back models as lists
+        heads["models"] = {lid: (None if np_models[lid] is None else np_models[lid].astype(np.float32).tolist())
+                           for lid in label_ids}
+        heads["label_ids"] = label_ids
+
+        # If feedback lacks scores, compute them from updated prototypes
+        for lid in label_ids:
+            if lid not in score_from_fb and np_models[lid] is not None:
+                score_from_fb[lid] = _cos01(x_norm, np_models[lid])
+
+    # --- Threshold adaptation for all heads ---
+    # Determine pred_pos set (fall back to recomputed scores if needed)
+    if not pred_pos_from_fb:
+        pred_pos_from_fb = {lid for lid, s in score_from_fb.items() if s >= float(thresholds.get(lid, 0.5))}
+
+    # Sets
+    agree = truth & pred_pos_from_fb
+    fn = truth - pred_pos_from_fb      # missed positives
+    fp = pred_pos_from_fb - truth      # predicted but not true
+
+    # EMA updates
+    for lid in agree:
+        s = float(score_from_fb.get(lid, thresholds.get(lid, 0.5)))
+        thr = float(thresholds.get(lid, 0.5))
+        thresholds[lid] = float(max(0.05, min(0.95, (1 - alpha_threshold) * thr + alpha_threshold * (s * 0.9))))
+
+    for lid in fn:
+        # lower threshold towards observed score (encourage recall on this label)
+        s = float(score_from_fb.get(lid, thresholds.get(lid, 0.5)))
+        thr = float(thresholds.get(lid, 0.5))
+        thresholds[lid] = float(max(0.05, min(0.95, (1 - alpha_threshold) * thr + alpha_threshold * (s * 0.85))))
+
+    for lid in fp:
+        # raise threshold towards observed score (reduce false positives)
+        s = float(score_from_fb.get(lid, thresholds.get(lid, 0.5)))
+        thr = float(thresholds.get(lid, 0.5))
+        thresholds[lid] = float(max(0.05, min(0.95, (1 - alpha_threshold) * thr + alpha_threshold * max(thr, s))))
+
+    heads["thresholds"] = thresholds
+
+    # Persist heads + incremental state
+    _save_heads_dict(heads_dir, heads)
+    _save_inc_state(heads_dir, st)
+    return heads
+
+def apply_feedback_log(
+    session_dir: Path,
+    heads_dir: Path,
+    limit: Optional[int] = None,
+    alpha_threshold: float = 0.06,
+) -> int:
+    """
+    Replays feedback.jsonl into heads incrementally.
+    Useful for periodic, batched refinement when live updates are off.
+    Returns number of feedback entries applied.
+    """
+    fb_path = session_dir / "feedback.jsonl"
+    if not fb_path.exists():
+        return 0
+
+    # Read lines (optionally tail 'limit')
+    lines = fb_path.read_text().splitlines()
+    if limit is not None:
+        lines = lines[-int(limit):]
+
+    n_applied = 0
+    for line in lines:
+        try:
+            obj = json.loads(line)
+            ts = obj.get("timestamp")
+            labels = (obj.get("labels") or {}).get("global") or []
+            feedback = obj.get("feedback")
+            updated = incremental_update_from_annotation(
+                session_dir=session_dir,
+                timestamp=ts,
+                positive_labels=list(map(str, labels)),
+                feedback=feedback,
+                heads_dir=heads_dir,
+                alpha_threshold=alpha_threshold,
+            )
+            if updated is not None:
+                n_applied += 1
+        except Exception:
+            continue
+    return n_applied

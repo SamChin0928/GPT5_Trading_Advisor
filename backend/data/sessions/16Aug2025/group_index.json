@@ -1,0 +1,21 @@
+{
+  "session_id": "16Aug2025",
+  "groups": [
+    {
+      "timestamp": 1755322463365,
+      "tz": "UTC",
+      "zones": [
+        {
+          "id": 0,
+          "role": "zone_0",
+          "path": "captures/1755322463365/zone_0.jpg"
+        },
+        {
+          "id": 1,
+          "role": "zone_1",
+          "path": "captures/1755322463365/zone_1.jpg"
+        }
+      ]
+    }
+  ]
+}
