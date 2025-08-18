@@ -18,6 +18,12 @@ const toQuery = (obj = {}) => {
   return s ? `?${s}` : ''
 }
 
+// ---- current process context (forward-compatible) ----
+let _currentProcessId = null
+export const setProcess = (pid) => { _currentProcessId = pid ? String(pid) : null }
+export const clearProcess = () => { _currentProcessId = null }
+export const getProcess = () => _currentProcessId
+
 async function handle(res) {
   const text = await res.text().catch(() => '')
   const ct = res.headers.get('content-type') || ''
@@ -42,7 +48,13 @@ function req(
   path,
   { method = 'GET', query, json, form, headers, signal, timeout = DEFAULT_TIMEOUT } = {}
 ) {
-  const url = join(BASE, path) + toQuery(query)
+  // Merge process_id into query/body/form so backend can scope per-process when ready.
+  const queryWithProcess = { ...(query || {}) }
+  if (_currentProcessId && queryWithProcess.process_id == null) {
+    queryWithProcess.process_id = _currentProcessId
+  }
+
+  const url = join(BASE, path) + toQuery(queryWithProcess)
   const ctrl = new AbortController()
   const timer = setTimeout(
     () => ctrl.abort(new DOMException('Request timeout', 'AbortError')),
@@ -56,9 +68,16 @@ function req(
   }
 
   if (json !== undefined) {
+    const body = { ...json }
+    if (_currentProcessId && body.process_id == null) {
+      body.process_id = _currentProcessId
+    }
     init.headers['Content-Type'] = 'application/json'
-    init.body = JSON.stringify(json)
+    init.body = JSON.stringify(body)
   } else if (form instanceof FormData) {
+    if (_currentProcessId && !form.has('process_id')) {
+      try { form.append('process_id', _currentProcessId) } catch {}
+    }
     init.body = form // let browser set content-type boundary
   }
 
@@ -67,7 +86,6 @@ function req(
 
 // ---- Realtime helpers (SSE + compatibility pings) ----
 const notifyUpdate = (type, detail = {}) => {
-  // For components already listening (Labeler.jsx), we keep these signals:
   try {
     window.dispatchEvent(
       new CustomEvent('captures:updated', { detail: { type, ...detail, at: Date.now() } })
@@ -82,7 +100,9 @@ let _es = null
 export const realtime = {
   start() {
     if (typeof window === 'undefined' || _es) return _es
-    const url = join(BASE, '/api/events')
+    const url = join(BASE, '/api/events') + toQuery(
+      _currentProcessId ? { process_id: _currentProcessId } : {}
+    )
     try {
       _es = new EventSource(url)
     } catch (e) {
@@ -95,7 +115,6 @@ export const realtime = {
       try {
         const evt = JSON.parse(e.data)
         const t = evt?.type
-        // Only react to relevant mutations
         if (t === 'capture' ||
             t === 'consolidated' ||
             t === 'annotation_saved' ||
@@ -105,11 +124,8 @@ export const realtime = {
         }
       } catch {}
     }
-    // Optional: greet/keepalive events
     _es.addEventListener('hello', () => {})
-    _es.onerror = () => {
-      // EventSource auto-reconnects; nothing to do.
-    }
+    _es.onerror = () => { /* auto-reconnect */ }
     return _es
   },
   stop() {
@@ -119,7 +135,8 @@ export const realtime = {
 }
 
 // Build a safe image URL for a file relative to a session folder
-// Use /api/data when BASE is empty (dev); use /data when BASE is set (prod).
+// NOTE: For now we keep the existing structure so nothing breaks.
+// When backend supports per-process data roots, we can add process_id to the path.
 const sessionImageUrl = (session_id, relPath) => {
   const safe = String(relPath).split('/').map(encodeURIComponent).join('/')
   const DATA_PREFIX = BASE ? '/data' : '/api/data'
@@ -138,6 +155,11 @@ const deleteGroupImage = (session_id, timestamp, pathOrFilename) => {
 }
 
 export const api = {
+  // ---- process context helpers ----
+  setProcess,
+  getProcess,
+  clearProcess,
+
   // ---- health ----
   health: () => req('/api/health'),
 
@@ -238,7 +260,6 @@ export const api = {
   // ---- model info & (optional) suggestion upsert ----
   modelInfo: () => req('/api/model/info'),
 
-  // If you keep the endpoint from the cleaned backend to persist model suggestions:
   saveModelSuggestion: (session_id, timestamp, suggestion) =>
     req('/api/annotations/model_suggestion', {
       method: 'POST',

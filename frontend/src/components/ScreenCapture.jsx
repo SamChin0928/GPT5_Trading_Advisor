@@ -297,10 +297,10 @@ export default function ScreenCapture({ onReady }) {
   const showSourceHint = isSharing && (isPaused || displaySurface === 'window')
 
   return (
-    <div className="flex gap-6 p-6 bg-gradient-to-br from-slate-950">
+    <div className="flex gap-6 p-6 bg-gradient-to-br from-slate-950 items-stretch">
       {/* Main Screen Capture Area */}
       <div className="flex-1">
-        <div className="bg-gradient-to-br from-slate-900 to-slate-800 rounded-2xl p-6 shadow-2xl border border-slate-700/50">
+        <div className="bg-gradient-to-br from-slate-900 to-slate-800 rounded-2xl p-6 shadow-2xl border border-slate-700/50 h-full">
           <div className="flex justify-between items-center mb-4">
             <h2 className="text-xl font-bold text-slate-100 flex items-center gap-3">
               <div className="p-2 bg-blue-600/20 rounded-lg">
