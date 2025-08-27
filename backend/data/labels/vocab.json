@@ -1,0 +1,28 @@
+{
+  "labels": [
+    {
+      "id": "pull_back",
+      "name": "Pull Back",
+      "slug": "pull-back",
+      "parent": null
+    },
+    {
+      "id": "neutral",
+      "name": "Neutral",
+      "slug": "neutral",
+      "parent": null
+    },
+    {
+      "id": "bear_breakout",
+      "name": "Bear Breakout",
+      "slug": "bear-breakout",
+      "parent": null
+    },
+    {
+      "id": "consolidation",
+      "name": "Consolidation",
+      "slug": "consolidation",
+      "parent": null
+    }
+  ]
+}
