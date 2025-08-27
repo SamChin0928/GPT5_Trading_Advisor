@@ -1,4 +1,4 @@
-// components/TrainControls.jsx
+// src/components/TrainControls.jsx
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../lib/api'
 import { Loader2 } from 'lucide-react'
@@ -6,8 +6,8 @@ import { Loader2 } from 'lucide-react'
 export default function TrainControls({ sessionId }) {
   const [includeAll, setIncludeAll] = useState(true) // default to true when no global model yet
   const [running, setRunning] = useState(false)
-  const [status, setStatus] = useState(null)     // object from /api/train/status
-  const [jobSessions, setJobSessions] = useState(null) // sessions used for this run
+  const [status, setStatus] = useState(null)
+  const [jobSessions, setJobSessions] = useState(null)
   const timer = useRef(null)
 
   // initial fetch of status (to know if a global model exists)
@@ -18,33 +18,29 @@ export default function TrainControls({ sessionId }) {
         const s = await api.trainStatus(sessionId)
         if (!alive) return
         setStatus(s)
-        // if a global model exists, ensure the toggle is false (hidden anyway)
         if (s?.global_model) setIncludeAll(false)
       } catch {}
     })()
     return () => { alive = false }
   }, [sessionId])
 
-  // --- start training ---
   async function start() {
     setRunning(true)
     setStatus(prev => ({ ...(prev || {}), status: 'running', stage: 'starting' }))
     try {
       const res = await api.train(sessionId, { include_all: includeAll })
       setJobSessions(res?.sessions || null)
-      poll() // begin polling loop
+      poll()
     } catch (e) {
       setRunning(false)
       setStatus({ status: 'error', error: e?.message || String(e) })
     }
   }
 
-  // --- reset global model ---
   async function onReset() {
     if (!confirm('Reset the global model? This will delete the existing model.')) return
     try {
       await api.modelReset()
-      // reflect state immediately in UI
       setStatus({ status: 'idle', global_model: false })
       setIncludeAll(true)
     } catch (e) {
@@ -52,7 +48,6 @@ export default function TrainControls({ sessionId }) {
     }
   }
 
-  // --- poll status until done/error ---
   async function poll() {
     clearTimeout(timer.current)
     const tick = async () => {
@@ -63,7 +58,6 @@ export default function TrainControls({ sessionId }) {
           timer.current = setTimeout(tick, 1000)
         } else {
           setRunning(false)
-          // one extra refresh shortly after "done" so global_model flips true
           if (s?.status === 'done') {
             setTimeout(async () => {
               try { setStatus(await api.trainStatus(sessionId)) } catch {}
@@ -79,8 +73,11 @@ export default function TrainControls({ sessionId }) {
   }
 
   useEffect(() => () => clearTimeout(timer.current), [])
+  // NEW: if the session rolls over, kill any pending poll so we don’t query stale session ids
+  useEffect(() => {
+    clearTimeout(timer.current)
+  }, [sessionId])
 
-  // --- compute % only for stages where we can ---
   const percent = useMemo(() => {
     if (!status || status.status !== 'running') return null
     if (status.mode === 'legacy_cnn' && Number.isFinite(status.epoch) && Number.isFinite(status.epochs) && status.epochs > 0) {
@@ -92,7 +89,6 @@ export default function TrainControls({ sessionId }) {
     return null
   }, [status])
 
-  // --- human readable line under the bar ---
   const stageLine = useMemo(() => {
     if (!status) return null
     if (status.status === 'running') {
@@ -116,7 +112,6 @@ export default function TrainControls({ sessionId }) {
       <div className="flex items-center justify-between">
         <div className="text-lg font-semibold text-slate-100">Training</div>
 
-        {/* right-side action */}
         <div className="flex items-center gap-3">
           <span className="text-[12px] text-slate-400 hidden sm:block">
             Tip: label at least <b>6</b> folders (global labels).
@@ -151,7 +146,6 @@ export default function TrainControls({ sessionId }) {
         </div>
       </div>
 
-      {/* options row */}
       {!hasGlobal && (
         <div className="flex items-center gap-3">
           <label className="flex items-center gap-2 text-sm text-slate-300">
@@ -165,14 +159,12 @@ export default function TrainControls({ sessionId }) {
         </div>
       )}
 
-      {/* sessions included */}
       {(status?.sessions?.length || jobSessions?.length) ? (
         <div className="text-xs text-slate-400">
           Sessions: {(status?.sessions || jobSessions).join(', ')}
         </div>
       ) : null}
 
-      {/* progress bar (only when we can compute %) */}
       {status?.status === 'running' && percent !== null && (
         <div className="w-full">
           <div className="h-2 w-full bg-slate-800/80 rounded-full overflow-hidden border border-white/10">
@@ -185,12 +177,10 @@ export default function TrainControls({ sessionId }) {
         </div>
       )}
 
-      {/* fallback text when % is not available */}
       {status?.status === 'running' && percent === null && (
         <div className="text-xs text-slate-400">{stageLine}</div>
       )}
 
-      {/* done / error */}
       {status?.status === 'done' && (
         <div className="text-xs text-emerald-300">
           Training complete{status?.report?.n_groups ? ` • ${status.report.n_groups} groups` : ''}.

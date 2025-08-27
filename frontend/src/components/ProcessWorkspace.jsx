@@ -24,13 +24,15 @@ function getProcessIdFromPath() {
 export default function ProcessWorkspace(){
   const processId = getProcessIdFromPath()
 
-  // Tell the API which process we're in (adds process_id to all requests)
+  // IMPORTANT: set the process immediately so children render with it
+  api.setProcess(processId)
   useEffect(() => {
+    // keep in effect as well to clean up on unmount
     api.setProcess(processId)
     return () => api.clearProcess()
   }, [processId])
 
-  // Session ID = today's date, read-only
+  // Session ID = today’s date, read-only (rolls over automatically on reload)
   const [sessionId] = useState(() => formatTodayId())
 
   // App-level mirrors used by Controls / LivePrediction
@@ -43,7 +45,6 @@ export default function ProcessWorkspace(){
   useEffect(() => {
     const onZones = (e) => {
       setZones(e.detail)
-      // auto-pick primaryId if none set and zones arrived
       if (e.detail?.length && (primaryId === null || !e.detail.some(z => z.id === primaryId))) {
         setPrimaryId(e.detail[0].id)
       }
@@ -65,6 +66,12 @@ export default function ProcessWorkspace(){
     window.dispatchEvent(new CustomEvent('predict:update', { detail: { pred, blob } }))
   }
 
+  function exitProcess() {
+    // SPA helper if present, otherwise full reload
+    if (typeof window.appNavigate === 'function') window.appNavigate('/')
+    else window.location.assign('/')
+  }
+
   return (
     <div className="max-w-7xl mx-auto p-4 space-y-4">
       {/* Header */}
@@ -75,7 +82,7 @@ export default function ProcessWorkspace(){
             Process: {processId || '—'}
           </span>
         </h1>
-        <div className="flex items-center gap-6">
+        <div className="flex items-center gap-3">
           {/* Session (read-only) */}
           <div className="flex items-center gap-2">
             <span className="text-slate-400 text-sm">Session:</span>
@@ -86,12 +93,20 @@ export default function ProcessWorkspace(){
               title="Session is date-based and read-only"
             />
           </div>
+          <button
+            onClick={exitProcess}
+            className="px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-white/10 text-sm"
+            title="Back to dashboard"
+          >
+            Exit
+          </button>
         </div>
       </div>
 
       {/* Capture + ROI overlay */}
       <div className="grid grid-cols-1">
-        <ScreenCapture onReady={onCapReady} />
+        {/* pass processId so ScreenCapture keys localStorage/server zones per process */}
+        <ScreenCapture onReady={onCapReady} processId={processId} />
       </div>
 
       {/* Controls */}
@@ -104,14 +119,14 @@ export default function ProcessWorkspace(){
       />
 
       <div className="grid grid-cols-2 gap-4">
-        <LivePrediction />
+        <LivePrediction sessionId={sessionId} />
         <div className="card">
           <div className="font-semibold mb-2">How it works</div>
           <ol className="list-decimal ml-5 space-y-1 text-slate-300 text-sm">
             <li>Click <b>Share Screen</b> and select the chart window/tab.</li>
             <li>Draw one or more <b>Zones</b>; set a <b>Primary</b> zone.</li>
             <li>Click <b>Start</b> to begin: crops stream to backend; the primary zone shows live prediction.</li>
-            <li>Open <b>Labeler</b> to label each <b>folder</b> (timestamp) or individual images. Your labels are saved to your vocab and reusable.</li>
+            <li>Open <b>Labeler</b> to label each <b>folder</b> (timestamp) or individual images.</li>
             <li>Click <b>Train</b> when you’ve labeled enough folders.</li>
           </ol>
         </div>

@@ -48,7 +48,7 @@ function req(
   path,
   { method = 'GET', query, json, form, headers, signal, timeout = DEFAULT_TIMEOUT } = {}
 ) {
-  // Merge process_id into query/body/form so backend can scope per-process when ready.
+  // Merge process_id into query/body/form so backend can scope per-process.
   const queryWithProcess = { ...(query || {}) }
   if (_currentProcessId && queryWithProcess.process_id == null) {
     queryWithProcess.process_id = _currentProcessId
@@ -119,7 +119,9 @@ export const realtime = {
             t === 'consolidated' ||
             t === 'annotation_saved' ||
             t === 'group_deleted' ||
-            t === 'image_deleted') {
+            t === 'image_deleted' ||
+            t === 'process_deleted' ||
+            t === 'session_deleted') {
           notifyUpdate(t, evt)
         }
       } catch {}
@@ -135,12 +137,13 @@ export const realtime = {
 }
 
 // Build a safe image URL for a file relative to a session folder
-// NOTE: For now we keep the existing structure so nothing breaks.
-// When backend supports per-process data roots, we can add process_id to the path.
+// DEV: if BASE is empty (Vite proxy), use /api/data to hit backend.
+// PROD: if BASE is set (absolute API), use /data (FastAPI static mount).
 const sessionImageUrl = (session_id, relPath) => {
   const safe = String(relPath).split('/').map(encodeURIComponent).join('/')
+  const pid = encodeURIComponent(String(_currentProcessId || 'default'))
   const DATA_PREFIX = BASE ? '/data' : '/api/data'
-  return join(BASE, `${DATA_PREFIX}/sessions/${encodeURIComponent(session_id)}/${safe}`)
+  return join(BASE, `${DATA_PREFIX}/${pid}/sessions/${encodeURIComponent(session_id)}/${safe}`)
 }
 
 // Wrap single-image delete helper so it also pings listeners
@@ -182,7 +185,7 @@ export const api = {
   mosaics: (session_id) =>
     req('/api/mosaics', { query: { session_id } }),
 
-  // ---- legacy labels & training ----
+  // ---- legacy labels (compat) & training ----
   label: (session_id, mosaic_rel_path, label) =>
     req('/api/label', { method: 'POST', json: { session_id, mosaic_rel_path, label } }),
 
@@ -208,26 +211,22 @@ export const api = {
     req('/api/predict_group', { query: { session_id, ...(timestamp ? { timestamp } : {}) } }),
 
   // ---- vocab / groups / annotations ----
-  getVocab: () => req('/api/labels/vocab'),
-  createVocabLabel: (name, parent) =>
-    req('/api/labels/vocab', { method: 'POST', json: { name, parent } }),
+  getVocab: () => req('/api/vocab'),
+  createVocabLabel: (name, _parent) =>
+    req('/api/vocab', { method: 'POST', json: { name } }),
 
-  // Single-session groups (include ann + labeled from backend)
   groups: (session_id, includePred = true) =>
     req('/api/groups', { query: { session_id, include_pred: includePred ? 1 : 0 } }),
 
-  // All sessions (set onlyUnlabeled=true to fetch only unlabeled)
   groupsAll: (onlyUnlabeled = false, includePred = true) =>
     req('/api/groups_all', {
       query: { only_unlabeled: onlyUnlabeled ? 1 : 0, include_pred: includePred ? 1 : 0 },
     }),
 
-  // Allow model_feedback (and future fields) to pass through unchanged
   annotate: (session_id, payload) =>
-    req('/api/annotate', { method: 'POST', json: { session_id, ...payload } })
+    req('/api/annotations/annotate', { method: 'POST', json: { session_id, ...payload } })
       .then((r) => { notifyUpdate('annotation_saved', { session_id, timestamp: payload.timestamp }); return r }),
 
-  // Centralized annotations slice for a session
   annotations: async (session_id) => {
     try {
       const data = await req('/api/annotations', { query: { session_id }, timeout: 10000 })
@@ -257,7 +256,20 @@ export const api = {
     req('/api/session/delete', { method: 'POST', json: { session_id } })
       .then((r) => { notifyUpdate('session_deleted', { session_id }); return r }),
 
-  // ---- model info & (optional) suggestion upsert ----
+  // NEW: delete a whole process (data/{process_id})
+  deleteProcess: (process_id) =>
+    req('/api/process/delete', { method: 'POST', json: { process_id } })
+      .then((r) => { notifyUpdate('process_deleted', { process_id }); return r }),
+
+  // NEW: convenience wrapper for current process
+  deleteCurrentProcess: () => {
+    const pid = getProcess()
+    if (!pid) throw new Error('No current process is set')
+    return req('/api/process/delete', { method: 'POST', json: { process_id: pid } })
+      .then((r) => { notifyUpdate('process_deleted', { process_id: pid }); return r })
+  },
+
+  // ---- model info & model suggestion ----
   modelInfo: () => req('/api/model/info'),
 
   saveModelSuggestion: (session_id, timestamp, suggestion) =>

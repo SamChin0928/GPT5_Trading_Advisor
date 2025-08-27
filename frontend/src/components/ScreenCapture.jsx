@@ -1,5 +1,5 @@
 // src/components/ScreenCapture.jsx
-import React, { useState, useRef, useEffect } from 'react'
+import React, { useState, useRef, useEffect, useMemo } from 'react'
 import ROISelector from './ROISelector'
 import { Monitor, Share2, StopCircle, Settings, AlertTriangle, Info } from 'lucide-react'
 import { api } from '../lib/api'
@@ -7,40 +7,16 @@ import { api } from '../lib/api'
 // ---- Helper: compute displayed video rect (handles object-contain letterboxing)
 function computeVideoRect(containerEl, videoEl) {
   if (!containerEl || !videoEl) return null
-
   const box = containerEl.getBoundingClientRect()
-  const boxW = box.width
-  const boxH = box.height
-
-  const vw = videoEl.videoWidth || 0
-  const vh = videoEl.videoHeight || 0
+  const boxW = box.width, boxH = box.height
+  const vw = videoEl.videoWidth || 0, vh = videoEl.videoHeight || 0
   if (!vw || !vh || !boxW || !boxH) return null
-
-  const arVideo = vw / vh
-  const arBox = boxW / boxH
-
+  const arVideo = vw / vh, arBox = boxW / boxH
   let dispW, dispH, offsetX, offsetY
-  if (arVideo > arBox) {
-    // fills width, bars top/bottom
-    dispW = boxW
-    dispH = boxW / arVideo
-    offsetX = 0
-    offsetY = (boxH - dispH) / 2
-  } else {
-    // fills height, bars left/right
-    dispH = boxH
-    dispW = boxH * arVideo
-    offsetY = 0
-    offsetX = (boxW - dispW) / 2
-  }
-
+  if (arVideo > arBox) { dispW = boxW; dispH = boxW / arVideo; offsetX = 0; offsetY = (boxH - dispH) / 2 }
+  else { dispH = boxH; dispW = boxH * arVideo; offsetY = 0; offsetX = (boxW - dispW) / 2 }
   return {
-    x: offsetX,
-    y: offsetY,
-    width: dispW,
-    height: dispH,
-    vw,
-    vh,
+    x: offsetX, y: offsetY, width: dispW, height: dispH, vw, vh,
     toVideoX: (cssX) => (cssX - offsetX) / dispW * vw,
     toVideoY: (cssY) => (cssY - offsetY) / dispH * vh,
     toCSSX:   (vidX)  => (vidX / vw) * dispW + offsetX,
@@ -48,27 +24,43 @@ function computeVideoRect(containerEl, videoEl) {
   }
 }
 
-// Toggle to show a green outline of the actual displayed video rect (for debugging)
 const DEBUG_VIDEO_RECT = false
+const SERVER_ZONES_ID = 'zones-global'
+const SAVE_DEBOUNCE_MS = 900
 
-export default function ScreenCapture({ onReady }) {
+// tolerate {zones:[...]}, array, etc.
+function normalizeServerZones(resp) {
+  if (!resp) return []
+  if (Array.isArray(resp)) return resp
+  if (Array.isArray(resp?.zones)) return resp.zones
+  if (Array.isArray(resp?.data)) return resp.data
+  for (const v of Object.values(resp)) {
+    if (Array.isArray(v) && v.length && typeof v[0] === 'object' && 'x' in v[0]) return v
+  }
+  return []
+}
+
+export default function ScreenCapture({ onReady, processId }) {
   const [zones, setZones] = useState([])
   const [primaryId, setPrimaryId] = useState(null)
   const [isSharing, setIsSharing] = useState(false)
-  const [isPaused, setIsPaused] = useState(false)              // track pause state
+  const [isPaused, setIsPaused] = useState(false)
   const [displaySurface, setDisplaySurface] = useState(null)   // "monitor" | "window" | "browser"
   const [screenSize, setScreenSize] = useState({ w: 1920, h: 1080 })
 
   const videoRef = useRef(null)
   const containerRef = useRef(null)
   const currentTrackRef = useRef(null)
-  const videoGeomRef = useRef(null) // <--- NEW: displayed video rect + converters
+  const videoGeomRef = useRef(null)
 
-  // ---- Persistence keys ----
-  const LS_KEY_V2 = 'zones:single:v2'
-  const LS_KEY_V1 = 'zones:single'
-  const SERVER_ZONES_ID = 'zones-global'
-  const SAVE_DEBOUNCE_MS = 900
+  // ✅ Process-scoped persistence keys (update when processId changes)
+  const { LS_KEY_V2, LS_KEY_V1 } = useMemo(() => {
+    const pid = processId ? String(processId) : 'default'
+    return {
+      LS_KEY_V2: `zones:${pid}:v2`,
+      LS_KEY_V1: `zones:${pid}:v1`,
+    }
+  }, [processId])
 
   const pendingFlush = useRef(false)
   const rafRef = useRef(null)
@@ -77,38 +69,26 @@ export default function ScreenCapture({ onReady }) {
 
   const validOnly = (arr) => (arr || []).filter(z => Number(z.w) > 0 && Number(z.h) > 0)
   const fingerprint = (zs, pid) => {
-    try { return JSON.stringify({ zs: zs.map(({id,x,y,w,h,isPrimary})=>({id,x,y,w,h,isPrimary: !!isPrimary})), pid }) } catch { return String(Date.now()) }
+    try { return JSON.stringify({ zs: zs.map(({id,x,y,w,h,isPrimary})=>({id,x,y,w,h,isPrimary: !!isPrimary})) }) } catch { return String(Date.now()) }
   }
 
   useEffect(() => { onReady && onReady({ captureFrame }) }, [onReady])
 
-  // NEW: tiny helper to notify others (e.g., Controls) about share status changes
   const emitShare = (detail) => {
     try { window.dispatchEvent(new CustomEvent('screenshare:change', { detail })) } catch {}
   }
 
-  // --- NEW: keep displayed video rect fresh
   function refreshVideoGeom() {
     if (!containerRef.current || !videoRef.current) return
     videoGeomRef.current = computeVideoRect(containerRef.current, videoRef.current)
   }
 
   useEffect(() => {
-    // refresh when layout changes
     const onResize = () => requestAnimationFrame(refreshVideoGeom)
     window.addEventListener('resize', onResize)
-
-    // periodic safety refresh while sharing (cheap)
-    const id = setInterval(() => {
-      if (isSharing) refreshVideoGeom()
-    }, 250)
-
-    // first pass
+    const id = setInterval(() => { if (isSharing) refreshVideoGeom() }, 250)
     refreshVideoGeom()
-    return () => {
-      window.removeEventListener('resize', onResize)
-      clearInterval(id)
-    }
+    return () => { window.removeEventListener('resize', onResize); clearInterval(id) }
   }, [isSharing])
 
   async function captureFrame() {
@@ -128,14 +108,16 @@ export default function ScreenCapture({ onReady }) {
     return { bmp: canvas, w, h, zones, primaryId }
   }
 
-  // Initial load: prefer server, fallback to local
+  // 🔁 Load zones whenever the process changes
   useEffect(() => {
     let cancelled = false
     ;(async () => {
+      // 1) server
       try {
         const server = await api.loadZones(SERVER_ZONES_ID)
-        if (!cancelled && Array.isArray(server) && server.length) {
-          const valid = validOnly(server)
+        const serverList = normalizeServerZones(server)
+        if (!cancelled && serverList.length) {
+          const valid = validOnly(serverList)
           const p = valid.find(z => z.isPrimary)?.id ?? (valid[0]?.id ?? null)
           setZones(valid.map(z => ({ ...z, isPrimary: z.id === p })))
           setPrimaryId(p)
@@ -145,6 +127,7 @@ export default function ScreenCapture({ onReady }) {
         }
       } catch {}
       if (cancelled) return
+      // 2) local (process-scoped)
       try {
         const rawV2 = localStorage.getItem(LS_KEY_V2)
         if (rawV2) {
@@ -164,13 +147,16 @@ export default function ScreenCapture({ onReady }) {
           setZones(valid.map(zz => ({ ...zz, isPrimary: zz.id === pid })))
           setPrimaryId(pid)
           window.dispatchEvent(new CustomEvent('zones:load', { detail: valid }))
+        } else {
+          // nothing found → broadcast empty so Controls knows
+          window.dispatchEvent(new CustomEvent('zones:load', { detail: [] }))
         }
       } catch {}
     })()
     return () => { cancelled = true }
-  }, [])
+  }, [LS_KEY_V2, LS_KEY_V1, processId])
 
-  // Persist (local + debounced server), and broadcast
+  // Save (local + server) and broadcast
   useEffect(() => {
     const valid = validOnly(zones)
     queueMicrotask?.(() => {
@@ -180,10 +166,10 @@ export default function ScreenCapture({ onReady }) {
     if (saveTimer.current) clearTimeout(saveTimer.current)
     saveTimer.current = setTimeout(async () => {
       const payloadZones = valid.map(z => ({ ...z, isPrimary: z.id === primaryId }))
-      const fp = fingerprint(payloadZones, primaryId)
+      const fp = fingerprint(payloadZones)
       if (fp !== lastSavedFingerprint.current) {
         try {
-          await api.saveZones(SERVER_ZONES_ID, payloadZones)
+          await api.saveZones(SERVER_ZONES_ID, payloadZones) // process_id is attached by api.js
           lastSavedFingerprint.current = fp
         } catch (e) {
           console.warn('zones save failed:', e?.message || e)
@@ -200,7 +186,7 @@ export default function ScreenCapture({ onReady }) {
     }
 
     return () => { if (rafRef.current) cancelAnimationFrame(rafRef.current) }
-  }, [zones, primaryId, isSharing])
+  }, [zones, primaryId, isSharing, LS_KEY_V2])
 
   useEffect(() => {
     if (!isSharing && pendingFlush.current) {
@@ -210,80 +196,51 @@ export default function ScreenCapture({ onReady }) {
     }
   }, [isSharing, zones])
 
-  // Attach events to the current track to detect pause/mute/ended
   function attachTrackEvents(track) {
     currentTrackRef.current = track
     setIsPaused(track.muted || false)
-    try {
-      const settings = track.getSettings?.()
-      setDisplaySurface(settings?.displaySurface || null)
-    } catch {
-      setDisplaySurface(null)
-    }
+    try { setDisplaySurface(track.getSettings?.().displaySurface || null) } catch { setDisplaySurface(null) }
     track.onmute = () => { setIsPaused(true);  emitShare({ isSharing: true, isPaused: true, displaySurface }) }
     track.onunmute = () => { setIsPaused(false); emitShare({ isSharing: true, isPaused: false, displaySurface }) }
     track.onended = () => {
-      setIsSharing(false)
-      setIsPaused(false)
-      setDisplaySurface(null)
-      currentTrackRef.current = null
-      videoGeomRef.current = null // NEW: clear geometry
+      setIsSharing(false); setIsPaused(false); setDisplaySurface(null)
+      currentTrackRef.current = null; videoGeomRef.current = null
       emitShare({ isSharing: false, reason: 'ended' })
     }
   }
 
-  // Start screen sharing
   const startScreenShare = async () => {
     try {
-      const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: { frameRate: 30 },
-        audio: false
-      })
-      const v = videoRef.current
-      if (!v) return
+      const stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 30 }, audio: false })
+      const v = videoRef.current; if (!v) return
       v.srcObject = stream
       await v.play()
-      await new Promise(resolve => {
-        if (v.videoWidth > 0 && v.videoHeight > 0) return resolve()
-        v.onloadedmetadata = () => resolve()
-      })
+      await new Promise(r => { if (v.videoWidth && v.videoHeight) r(); else v.onloadedmetadata = () => r() })
       setScreenSize({ w: v.videoWidth || 1920, h: v.videoHeight || 1080 })
-      setIsSharing(true)
-      refreshVideoGeom() // NEW: compute geometry right after stream is ready
+      setIsSharing(true); refreshVideoGeom()
       emitShare({ isSharing: true, isPaused: false, displaySurface })
-
-      const [track] = stream.getVideoTracks()
-      if (track) {
-        attachTrackEvents(track)
-      }
+      const [track] = stream.getVideoTracks(); if (track) attachTrackEvents(track)
     } catch (err) {
       console.error('Error sharing screen:', err)
-      setIsSharing(false)
-      emitShare({ isSharing: false, reason: 'getDisplayMedia_error' })
+      setIsSharing(false); emitShare({ isSharing: false, reason: 'getDisplayMedia_error' })
     }
   }
 
-  // Stop screen sharing
   const stopScreenShare = () => {
     const stream = videoRef.current?.srcObject
     if (stream) stream.getTracks().forEach(t => t.stop())
     if (videoRef.current) videoRef.current.srcObject = null
-    setIsSharing(false)
-    setIsPaused(false)
-    setDisplaySurface(null)
-    currentTrackRef.current = null
-    videoGeomRef.current = null // NEW
+    setIsSharing(false); setIsPaused(false); setDisplaySurface(null)
+    currentTrackRef.current = null; videoGeomRef.current = null
     emitShare({ isSharing: false, reason: 'manual_stop' })
   }
 
-  // Switch source quickly (re-open picker)
   const switchSource = async () => {
     const old = videoRef.current?.srcObject
     if (old) old.getTracks().forEach(t => t.stop())
     await startScreenShare()
   }
 
-  // Zone helpers
   const deleteZone = (zoneId) => {
     setZones(prev => {
       const nz = prev.filter(z => z.id !== zoneId)
@@ -291,9 +248,7 @@ export default function ScreenCapture({ onReady }) {
       return nz
     })
   }
-  const clearAllZones = () => { setZones([]); setPrimaryId(null) }
 
-  // Banner explaining pause & how to fix (choose Entire Screen)
   const showSourceHint = isSharing && (isPaused || displaySurface === 'window')
 
   return (
@@ -303,9 +258,7 @@ export default function ScreenCapture({ onReady }) {
         <div className="bg-gradient-to-br from-slate-900 to-slate-800 rounded-2xl p-6 shadow-2xl border border-slate-700/50 h-full">
           <div className="flex justify-between items-center mb-4">
             <h2 className="text-xl font-bold text-slate-100 flex items-center gap-3">
-              <div className="p-2 bg-blue-600/20 rounded-lg">
-                <Monitor className="w-6 h-6 text-blue-400" />
-              </div>
+              <div className="p-2 bg-blue-600/20 rounded-lg"><Monitor className="w-6 h-6 text-blue-400" /></div>
               Screen Capture
             </h2>
             <div className="flex items-center gap-3">
@@ -316,20 +269,15 @@ export default function ScreenCapture({ onReady }) {
                 </div>
               )}
               {isSharing && (
-                <button
-                  onClick={switchSource}
-                  className="px-3 py-2 rounded-xl bg-slate-700 hover:bg-slate-600 text-slate-100 border border-slate-600/40 text-sm"
-                  title="Change what you’re sharing (pick Entire Screen to avoid pauses)"
-                >
+                <button onClick={switchSource} className="px-3 py-2 rounded-xl bg-slate-700 hover:bg-slate-600 text-slate-100 border border-slate-600/40 text-sm">
                   Switch Source
                 </button>
               )}
               <button
                 onClick={isSharing ? stopScreenShare : startScreenShare}
                 className={`px-5 py-2.5 rounded-xl font-medium transition-all duration-200 flex items-center gap-2 ${
-                  isSharing
-                    ? 'bg-red-600/20 hover:bg-red-600/30 text-red-400 border border-red-600/30'
-                    : 'bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 border border-blue-600/30'
+                  isSharing ? 'bg-red-600/20 hover:bg-red-600/30 text-red-400 border border-red-600/30'
+                            : 'bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 border border-blue-600/30'
                 }`}
               >
                 {isSharing ? (<><StopCircle className="w-4 h-4" />Stop Share</>)
@@ -338,18 +286,13 @@ export default function ScreenCapture({ onReady }) {
             </div>
           </div>
 
-          {/* Helpful hint for macOS/window capture pausing */}
           {showSourceHint && (
             <div className="mb-4 p-3 rounded-lg bg-amber-900/30 border border-amber-700/40 text-amber-200 text-sm">
               <div className="font-medium mb-1">Capture may pause when the shared window is hidden or when switching desktops.</div>
-              <div>
-                To avoid this on macOS (and multi-monitor setups), click <b>Switch Source</b> and choose <b>Entire Screen</b>.
-                You can select which monitor to capture in the picker.
-              </div>
+              <div>To avoid this, click <b>Switch Source</b> and choose <b>Entire Screen</b>.</div>
             </div>
           )}
 
-          {/* Screen Preview with ROI Overlay */}
           <div
             ref={containerRef}
             className="relative bg-slate-950 rounded-xl overflow-hidden border border-slate-700/50"
@@ -361,11 +304,10 @@ export default function ScreenCapture({ onReady }) {
               muted
               playsInline
               className="w-full h-full object-contain"
-              onLoadedMetadata={refreshVideoGeom} // NEW: recompute on metadata
+              onLoadedMetadata={refreshVideoGeom}
               style={{ display: isSharing ? 'block' : 'none', maxWidth: '100%', maxHeight: '100%' }}
             />
 
-            {/* Placeholder when not sharing */}
             {!isSharing && (
               <div className="absolute inset-0 flex items-center justify-center">
                 <div className="text-center">
@@ -378,7 +320,6 @@ export default function ScreenCapture({ onReady }) {
               </div>
             )}
 
-            {/* Optional debug outline of the true displayed video area */}
             {DEBUG_VIDEO_RECT && isSharing && videoGeomRef.current && (
               <div
                 className="absolute pointer-events-none"
@@ -393,7 +334,6 @@ export default function ScreenCapture({ onReady }) {
               />
             )}
 
-            {/* Overlay only while sharing */}
             {isSharing && (
               <div className="absolute inset-0" style={{ zIndex: 10 }}>
                 <ROISelector
@@ -405,7 +345,7 @@ export default function ScreenCapture({ onReady }) {
                   overlayMode={true}
                   showBackground={false}
                   perf={true}
-                  videoGeom={videoGeomRef}  // NEW: pass displayed rect & converters
+                  videoGeom={videoGeomRef}
                 />
               </div>
             )}
@@ -513,9 +453,7 @@ export default function ScreenCapture({ onReady }) {
                 <AlertTriangle className="w-5 h-5 text-amber-400 flex-shrink-0 mt-0.5" />
                 <div>
                   <p className="text-sm text-amber-400 font-medium mb-1">No Primary Zone</p>
-                  <p className="text-xs text-amber-400/70">
-                    Set a primary zone to enable live predictions and pattern detection.
-                  </p>
+                  <p className="text-xs text-amber-400/70">Set a primary zone to enable live predictions.</p>
                 </div>
               </div>
             </div>
@@ -528,26 +466,9 @@ export default function ScreenCapture({ onReady }) {
               <h4 className="text-sm font-semibold text-slate-200">Quick Guide</h4>
             </div>
             <ul className="space-y-2 text-xs text-slate-400">
-              <li className="flex items-start gap-2">
-                <span className="text-blue-400">•</span>
-                <span>Click and drag on the preview to create zones.</span>
-              </li>
-              <li className="flex items-start gap-2">
-                <span className="text-blue-400">•</span>
-                <span>Choose a <b>Primary</b> zone to power live predictions.</span>
-              </li>
-              <li className="flex items-start gap-2">
-                <span className="text-blue-400">•</span>
-                <span>Draw/delete updates are instant, even while sharing.</span>
-              </li>
-              <li className="flex items-start gap-2">
-                <span className="text-blue-400">•</span>
-                <span>Zones auto-save to the server and reload on any machine.</span>
-              </li>
-              <li className="flex items-start gap-2">
-                <span className="text-blue-400">•</span>
-                <span>Use <b>Start Capture</b> to begin saving crops for each timestamp.</span>
-              </li>
+              <li className="flex items-start gap-2"><span className="text-blue-400">•</span><span>Click and drag on the preview to create zones.</span></li>
+              <li className="flex items-start gap-2"><span className="text-blue-400">•</span><span>Choose a <b>Primary</b> zone to power live predictions.</span></li>
+              <li className="flex items-start gap-2"><span className="text-blue-400">•</span><span>Zones auto-save & auto-reload per process.</span></li>
             </ul>
           </div>
         </div>

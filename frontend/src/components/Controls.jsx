@@ -16,6 +16,9 @@ export default function Controls({ sessionId, zones, primaryId, captureHandle, o
   // SYNC-TO-MINUTE: track the next *wall-clock* capture time (ms since epoch)
   const nextAtRef  = useRef(null)
 
+  // NEW: simple countdown UI (ms until nextAtRef)
+  const [countdownMs, setCountdownMs] = useState(null)
+
   // listen for ScreenCapture share status
   useEffect(() => {
     const onShare = (e) => {
@@ -36,6 +39,17 @@ export default function Controls({ sessionId, zones, primaryId, captureHandle, o
     if (!running) return
     alignAndScheduleNext()
   }, [intervalMin, running])
+
+  // NEW: live countdown tick
+  useEffect(() => {
+    if (!running) { setCountdownMs(null); return }
+    const id = setInterval(() => {
+      const now = Date.now()
+      const target = nextAtRef.current || computeNextAlignedTime(now)
+      setCountdownMs(Math.max(0, target - now))
+    }, 200)
+    return () => clearInterval(id)
+  }, [running, intervalMin])
 
   // Resolve capture handle (ref or direct object)
   function resolveHandle() {
@@ -145,6 +159,7 @@ export default function Controls({ sessionId, zones, primaryId, captureHandle, o
       timerRef.current = null
     }
     nextAtRef.current = null
+    setCountdownMs(null) // NEW
   }
 
   // SYNC-TO-MINUTE: schedule next run based on nextAtRef
@@ -158,11 +173,11 @@ export default function Controls({ sessionId, zones, primaryId, captureHandle, o
       target = computeNextAlignedTime(now)
     } else {
       // ensure target is still in the future for the (possibly) new interval
-      // move forward to the next multiple of the new interval that is >= now
       const missed = Math.max(0, Math.ceil((now - target) / interval))
       target = target + missed * interval
     }
     nextAtRef.current = target
+    setCountdownMs(Math.max(0, target - now)) // NEW
     scheduleNext(Math.max(0, target - now))
   }
 
@@ -218,6 +233,9 @@ export default function Controls({ sessionId, zones, primaryId, captureHandle, o
         const timestamp = String(plannedAt)
         const tz = Intl.DateTimeFormat().resolvedOptions().timeZone
         await api.ingest({ session_id: sessionId, timestamp, zone_ids, images, tz })
+        // NEW: broadcast so Labeler refreshes immediately
+        try { localStorage.setItem('captures_updated_at', String(Date.now())) } catch {}
+        try { window.dispatchEvent(new CustomEvent('captures:updated', { detail: { session_id: sessionId, timestamp } })) } catch {}
       }
 
       // Optional: live prediction for primary zone
@@ -255,8 +273,31 @@ export default function Controls({ sessionId, zones, primaryId, captureHandle, o
       nextAt += missed * interval
     }
     nextAtRef.current = nextAt
+    setCountdownMs(Math.max(0, nextAt - now)) // NEW
     scheduleNext(Math.max(0, nextAt - now))
   }
+
+  function fmtDur(ms) {
+    const s = Math.max(0, Math.floor(ms / 1000))
+    const mm = Math.floor(s / 60).toString().padStart(2, '0')
+    const ss = (s % 60).toString().padStart(2, '0')
+    return `${mm}:${ss}`
+  }
+  const nextHuman = (() => {
+    if (!countdownMs || !nextAtRef.current) return ''
+    try {
+      const d = new Date(nextAtRef.current)
+      return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    } catch { return '' }
+  })()
+
+  // Progress % until next shot (for a tiny bar)
+  const pct = (() => {
+    if (!running || !countdownMs || !nextAtRef.current) return 0
+    const interval = getIntervalMs()
+    const elapsed = interval - Math.min(interval, countdownMs)
+    return Math.max(0, Math.min(100, Math.round((elapsed / interval) * 100)))
+  })()
 
   return (
     <div className="bg-gradient-to-br from-slate-900 to-slate-800 rounded-2xl p-6 shadow-2xl border border-slate-700/50">
@@ -282,6 +323,23 @@ export default function Controls({ sessionId, zones, primaryId, captureHandle, o
                 className="flex-1 px-3 py-2 bg-slate-800/50 border border-slate-700 rounded-lg focus:outline-none focus:border-blue-500 transition-colors text-slate-100"
               />
             </div>
+
+            {/* NEW: Next-capture countdown */}
+            {running && (
+              <div className="rounded-lg border border-white/10 bg-slate-800/50 p-3">
+                <div className="flex items-center justify-between text-sm">
+                  <span className="text-slate-300">Next capture</span>
+                  <span className="text-slate-200 font-medium">{nextHuman}</span>
+                </div>
+                <div className="mt-1 flex items-center justify-between">
+                  <div className="h-1.5 w-full bg-slate-700/60 rounded-full overflow-hidden border border-white/10">
+                    <div className="h-full bg-emerald-500 transition-all" style={{ width: `${pct}%` }} />
+                  </div>
+                  <span className="ml-3 text-xs text-slate-300 tabular-nums">{fmtDur(countdownMs || 0)}</span>
+                </div>
+              </div>
+            )}
+
             <div className="flex gap-3">
               <button
                 onClick={start}
