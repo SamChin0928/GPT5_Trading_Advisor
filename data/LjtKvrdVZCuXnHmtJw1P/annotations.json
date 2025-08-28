@@ -1,0 +1,79 @@
+{
+  "28Aug2025": {
+    "1756350480000": {
+      "model_pred": {
+        "top": "neutral",
+        "probs": {
+          "bullish": 0.2,
+          "bearish": 0.3,
+          "neutral": 0.5
+        },
+        "global": [
+          {
+            "id": "neutral",
+            "conf": 0.5
+          },
+          {
+            "id": "bearish",
+            "conf": 0.3
+          },
+          {
+            "id": "bullish",
+            "conf": 0.2
+          }
+        ],
+        "at": 1756350480
+      }
+    },
+    "1756350540000": {
+      "model_pred": {
+        "top": "neutral",
+        "probs": {
+          "bullish": 0.2,
+          "bearish": 0.3,
+          "neutral": 0.5
+        },
+        "global": [
+          {
+            "id": "neutral",
+            "conf": 0.5
+          },
+          {
+            "id": "bearish",
+            "conf": 0.3
+          },
+          {
+            "id": "bullish",
+            "conf": 0.2
+          }
+        ],
+        "at": 1756350540
+      }
+    },
+    "1756350600000": {
+      "model_pred": {
+        "top": "neutral",
+        "probs": {
+          "bullish": 0.2,
+          "bearish": 0.3,
+          "neutral": 0.5
+        },
+        "global": [
+          {
+            "id": "neutral",
+            "conf": 0.5
+          },
+          {
+            "id": "bearish",
+            "conf": 0.3
+          },
+          {
+            "id": "bullish",
+            "conf": 0.2
+          }
+        ],
+        "at": 1756350600
+      }
+    }
+  }
+}

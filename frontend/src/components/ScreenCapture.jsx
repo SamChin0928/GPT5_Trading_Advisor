@@ -94,18 +94,34 @@ export default function ScreenCapture({ onReady, processId }) {
   async function captureFrame() {
     const v = videoRef.current
     if (!v || v.videoWidth === 0 || v.videoHeight === 0) return null
+    
     const w = v.videoWidth, h = v.videoHeight
+    
     const canvas = (typeof OffscreenCanvas !== 'undefined') ? new OffscreenCanvas(w, h) : document.createElement('canvas')
     canvas.width = w; canvas.height = h
     const ctx = canvas.getContext('2d')
     ctx.drawImage(v, 0, 0, w, h)
+    
+    let bmp
     if (typeof createImageBitmap !== 'undefined') {
       try {
-        const bmp = 'transferToImageBitmap' in canvas ? canvas.transferToImageBitmap() : await createImageBitmap(canvas)
-        return { bmp, w, h, zones, primaryId }
-      } catch {}
+        bmp = 'transferToImageBitmap' in canvas ? canvas.transferToImageBitmap() : await createImageBitmap(canvas)
+      } catch {
+        bmp = canvas
+      }
+    } else {
+      bmp = canvas
     }
-    return { bmp: canvas, w, h, zones, primaryId }
+    
+    // CRITICAL: Always pass zones
+    console.log('[ScreenCapture] captureFrame returning zones:', zones)
+    return { 
+      bmp, 
+      w, 
+      h, 
+      zones: zones || [],  // Always include current zones
+      primaryId: primaryId
+    }
   }
 
   // 🔁 Load zones whenever the process changes

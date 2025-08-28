@@ -64,8 +64,21 @@ export default function Controls({ sessionId, zones, primaryId, captureHandle, o
 
   // Only zones with positive size
   function getValidZones(list = zones) {
-    return (list || []).filter(z => Number(z.w) > 0 && Number(z.h) > 0)
+    const validZones = (list || []).filter(z => {
+      // More lenient validation - check if w and h exist and are > 0 OR are between 0-1 (normalized)
+      const hasValidDimensions = (
+        (Number(z.w) > 0 && Number(z.h) > 0) || 
+        (z.w > 0 && z.w <= 1 && z.h > 0 && z.h <= 1)
+      );
+      if (!hasValidDimensions) {
+        console.warn('[Controls] Invalid zone dimensions:', z);
+      }
+      return hasValidDimensions;
+    });
+    console.log('[Controls] Valid zones:', validZones.length, 'from', list?.length || 0, 'total zones');
+    return validZones;
   }
+
 
   // Canvas helpers
   function makeCanvas(w, h) {
@@ -128,11 +141,28 @@ export default function Controls({ sessionId, zones, primaryId, captureHandle, o
 
   // SYNC-TO-MINUTE: compute the next capture time aligned to the interval grid
   function computeNextAlignedTime(fromMs) {
-    const interval = getIntervalMs()               // multiple of 60_000
-    return Math.ceil(fromMs / interval) * interval // next multiple from epoch (minute-aligned)
+    const interval = getIntervalMs()
+    // Don't align to minute boundaries for intervals < 60 seconds
+    // Only align to minute boundaries for intervals >= 1 minute
+    if (interval >= 60000) {
+      // Align to next minute boundary
+      const d = new Date(fromMs)
+      d.setSeconds(0, 0) // Reset seconds and milliseconds
+      let target = d.getTime()
+      // Move to next minute if we're past the current minute start
+      if (target <= fromMs) {
+        target += 60000
+      }
+      return target
+    } else {
+      // For sub-minute intervals, just use the interval from now
+      return fromMs + interval
+    }
   }
 
   function start() {
+    console.log('[Controls] Starting capture with zones:', zones?.length, 'primary:', primaryId)
+    
     // NEW GUARD: do not start if not sharing
     if (!sharing) {
       alert('Please share your screen before starting capture.')
@@ -143,8 +173,11 @@ export default function Controls({ sessionId, zones, primaryId, captureHandle, o
       alert('Please share your screen first.')
       return
     }
-    if (getValidZones().length === 0) {
-      console.warn('No valid zones from parent; will try zones from capture frame.')
+    const validZones = getValidZones(zones)
+    if (validZones.length === 0) {
+      console.warn('[Controls] No valid zones from parent; will try zones from capture frame.')
+    } else {
+      console.log('[Controls] Starting with', validZones.length, 'valid zones')
     }
     stoppedRef.current = false
     setRunning(true)
@@ -197,13 +230,17 @@ export default function Controls({ sessionId, zones, primaryId, captureHandle, o
     try {
       const handle = resolveHandle()
       if (!handle || typeof handle.captureFrame !== 'function') {
-        console.warn('Capture handle missing; stopping.')
+        console.warn('[Controls] Capture handle missing; stopping.')
         stop()
         return
       }
 
       const frame = await handle.captureFrame()
-      if (!frame) { finalizeAndPlanNext(); return }
+      if (!frame) { 
+        console.warn('[Controls] No frame captured')
+        finalizeAndPlanNext()
+        return 
+      }
 
       const {
         bmp, w, h, view,
@@ -211,40 +248,139 @@ export default function Controls({ sessionId, zones, primaryId, captureHandle, o
         primaryId: framePrimaryId
       } = frame
 
-      if (!bmp || !w || !h) { finalizeAndPlanNext(); return }
+      console.log('[Controls] Frame captured:', { w, h, hasView: !!view, frameZones: frameZones?.length, framePrimaryId })
 
-      // Prefer parent zones; fallback to zones captured with the frame
-      let zonesForUse = getValidZones()
-      if (zonesForUse.length === 0 && Array.isArray(frameZones)) {
-        zonesForUse = getValidZones(frameZones)
+      if (!bmp || !w || !h) { 
+        console.warn('[Controls] Invalid frame data:', { hasBmp: !!bmp, w, h })
+        finalizeAndPlanNext()
+        return 
+      }
+
+      // CRITICAL FIX: Prefer frameZones from ScreenCapture, then fallback to parent zones
+      let zonesForUse = []
+      
+      // First try zones from the frame (these come directly from ScreenCapture)
+      if (Array.isArray(frameZones) && frameZones.length > 0) {
+        console.log('[Controls] Using zones from frame:', frameZones)
+        zonesForUse = frameZones.filter(z => z && Number(z.w) > 0 && Number(z.h) > 0)
+      } 
+      // Fallback to parent zones prop if no frame zones
+      else if (Array.isArray(zones) && zones.length > 0) {
+        console.log('[Controls] Using zones from props:', zones)
+        zonesForUse = zones.filter(z => z && Number(z.w) > 0 && Number(z.h) > 0)
+      }
+      
+      console.log('[Controls] Zones to use for capture:', zonesForUse.length)
+
+      if (zonesForUse.length === 0) {
+        console.warn('[Controls] No valid zones available for capture')
+        finalizeAndPlanNext()
+        return
       }
 
       // Build crops
       const zone_ids = []
-      const images   = []
+      const images = []
+      console.log('[Controls] Processing zones for capture:', zonesForUse)
+      
       for (const z of zonesForUse) {
-        const { sx, sy, sw, sh } = zoneToVideoRect(z, w, h, view)
-        const dataUrl = await dataUrlFromBitmap(bmp, sx, sy, sw, sh)
-        if (dataUrl) { zone_ids.push(z.id); images.push(dataUrl) }
+        // FIXED: Handle both normalized (0-1) and pixel coordinates
+        let sx, sy, sw, sh
+        
+        // Check if normalized (all values between 0 and 1)
+        if (z.x <= 1 && z.y <= 1 && z.w <= 1 && z.h <= 1) {
+          // Normalized coordinates - convert to pixels
+          sx = Math.round(z.x * w)
+          sy = Math.round(z.y * h)
+          sw = Math.round(z.w * w)
+          sh = Math.round(z.h * h)
+          console.log('[Controls] Zone', z.id, 'normalized:', { x: z.x, y: z.y, w: z.w, h: z.h }, '-> pixels:', { sx, sy, sw, sh })
+        } else {
+          // Already in pixel coordinates
+          sx = Math.round(z.x)
+          sy = Math.round(z.y)
+          sw = Math.round(z.w)
+          sh = Math.round(z.h)
+          console.log('[Controls] Zone', z.id, 'pixels:', { sx, sy, sw, sh })
+        }
+        
+        // Ensure we have valid dimensions
+        sx = Math.max(0, sx)
+        sy = Math.max(0, sy)
+        sw = Math.min(sw, w - sx)
+        sh = Math.min(sh, h - sy)
+        
+        if (sw > 0 && sh > 0) {
+          const dataUrl = await dataUrlFromBitmap(bmp, sx, sy, sw, sh)
+          if (dataUrl) { 
+            zone_ids.push(z.id)
+            images.push(dataUrl)
+            console.log('[Controls] Successfully captured zone', z.id)
+          } else {
+            console.warn('[Controls] Failed to capture zone', z.id)
+          }
+        } else {
+          console.warn('[Controls] Invalid dimensions for zone', z.id, { sx, sy, sw, sh })
+        }
       }
 
       if (images.length > 0) {
         // EXACT-MINUTE-TS: stamp the folder with the *boundary* time, not "now"
         const timestamp = String(plannedAt)
         const tz = Intl.DateTimeFormat().resolvedOptions().timeZone
-        await api.ingest({ session_id: sessionId, timestamp, zone_ids, images, tz })
-        // NEW: broadcast so Labeler refreshes immediately
+        
+        console.log('[Controls] Preparing to ingest:', {
+          session_id: sessionId,
+          timestamp,
+          zone_ids,
+          num_images: images.length,
+          process: api.getProcess(),
+          tz
+        })
+        
+        try {
+          const result = await api.ingest({ 
+            session_id: sessionId, 
+            timestamp, 
+            zone_ids, 
+            images, 
+            tz 
+          })
+          console.log('[Controls] Ingest success:', result)
+        } catch (err) {
+          console.error('[Controls] Ingest failed:', err)
+          alert(`Failed to save screenshots: ${err.message || 'Unknown error'}`)
+        }
+        
+        // Broadcast so Labeler refreshes immediately
         try { localStorage.setItem('captures_updated_at', String(Date.now())) } catch {}
         try { window.dispatchEvent(new CustomEvent('captures:updated', { detail: { session_id: sessionId, timestamp } })) } catch {}
+      } else {
+        console.warn('[Controls] No images captured - zones might be invalid')
       }
 
       // Optional: live prediction for primary zone
-      let pz = zonesForUse.find(z => z.id === primaryId)
+      let pz = zonesForUse.find(z => z.id === primaryId || z.isPrimary)
       if (!pz && typeof framePrimaryId === 'number') {
         pz = zonesForUse.find(z => z.id === framePrimaryId)
       }
+      
       if (pz) {
-        const { sx, sy, sw, sh } = zoneToVideoRect(pz, w, h, view)
+        // Handle normalized vs pixel coordinates for prediction too
+        let sx, sy, sw, sh
+        
+        if (pz.x <= 1 && pz.y <= 1 && pz.w <= 1 && pz.h <= 1) {
+          sx = Math.round(pz.x * w)
+          sy = Math.round(pz.y * h)
+          sw = Math.round(pz.w * w)
+          sh = Math.round(pz.h * h)
+        } else {
+          sx = Math.round(pz.x)
+          sy = Math.round(pz.y)
+          sw = Math.round(pz.w)
+          sh = Math.round(pz.h)
+        }
+        
         if (sw > 0 && sh > 0) {
           const canvas = makeCanvas(sw, sh)
           const ctx = canvas.getContext('2d')
@@ -255,12 +391,13 @@ export default function Controls({ sessionId, zones, primaryId, captureHandle, o
         }
       }
     } catch (err) {
-      console.error('Loop error:', err)
+      console.error('[Controls] Loop error:', err)
     } finally {
       inFlight.current = false
       finalizeAndPlanNext()
     }
   }
+
 
   // SYNC-TO-MINUTE: move nextAt forward exactly one interval (catching up if needed)
   function finalizeAndPlanNext() {

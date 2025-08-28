@@ -211,17 +211,35 @@ def write_vocab(process_id: str, labels: List[str]) -> None:
 # Zones helpers
 # -----------------------
 def save_zones_global(process_id: str, zones: List[Dict[str, Any]]) -> None:
+    """Save zones to zones-global.json with debugging"""
     p = zones_global_json(process_id)
     p.parent.mkdir(parents=True, exist_ok=True)  # ensure zones/ exists for writes
+    
+    # Debug log
+    print(f"[save_zones_global] Saving {len(zones)} zones to {p}")
+    for i, zone in enumerate(zones):
+        print(f"  Zone {i}: id={zone.get('id')}, x={zone.get('x')}, y={zone.get('y')}, w={zone.get('w')}, h={zone.get('h')}")
+    
     p.write_text(json.dumps(zones, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"[save_zones_global] Saved successfully")
 
 def load_zones_global(process_id: str) -> List[Dict[str, Any]]:
+    """Load zones from zones-global.json with debugging"""
     p = zones_global_json(process_id)  # no mkdir
+    print(f"[load_zones_global] Loading zones from {p}")
+    
     if not p.exists():
+        print(f"[load_zones_global] File does not exist: {p}")
         return []
+    
     try:
-        return json.loads(p.read_text(encoding="utf-8"))
-    except Exception:
+        zones = json.loads(p.read_text(encoding="utf-8"))
+        print(f"[load_zones_global] Loaded {len(zones)} zones")
+        for i, zone in enumerate(zones):
+            print(f"  Zone {i}: id={zone.get('id')}, x={zone.get('x')}, y={zone.get('y')}, w={zone.get('w')}, h={zone.get('h')}")
+        return zones
+    except Exception as e:
+        print(f"[load_zones_global] Failed to load zones: {e}")
         return []
 
 # -----------------------

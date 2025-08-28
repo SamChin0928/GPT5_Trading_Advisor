@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from typing import Any, Dict, List, Optional
 from pathlib import Path
 from PIL import Image
-import time, shutil
+import time, shutil, json
 
 from .utils import (
     DATA_DIR,
@@ -26,9 +26,9 @@ from .utils import (
     delete_session_dir, delete_process_dir,
 )
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────────
 # App + Static
-# ──────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────────
 app = FastAPI(title="GPT5 Trading CV API")
 
 # Serve files so frontend can use /data/<process>/sessions/<session>/...
@@ -44,20 +44,24 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────────
 # Helpers
-# ──────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────────
 def _get_process_id(
     x_process_id: Optional[str] = Header(None),
     q_process_id: Optional[str] = Query(None),
     body_process_id: Optional[str] = None,
 ) -> str:
     """
-    Resolve current process id from header 'x-process-id', query 'process_id',
-    or an explicit body-provided override (for callers that only send JSON).
-    IMPORTANT: no implicit mkdir here. We only create directories in write paths.
+    Resolve current process id. Raises HTTPException if none provided.
     """
-    return (body_process_id or x_process_id or q_process_id or "default")
+    pid = body_process_id or x_process_id or q_process_id
+    if not pid:
+        raise HTTPException(
+            status_code=400, 
+            detail="No process_id provided. Please specify a process_id in the request."
+        )
+    return pid
 
 def _latest_timestamp_dir(cap_dir: Path) -> Optional[Path]:
     if not cap_dir.exists():
@@ -123,9 +127,9 @@ def _get_labeled_flag(pid: str, session_id: str, ts: str) -> bool:
     gl = entry.get("global") or []
     return bool(gl and isinstance(gl, list) and len(gl) > 0)
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────────
 # Schemas
-# ──────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────────
 class IngestPayload(BaseModel):
     session_id: str
     timestamp: str
@@ -168,26 +172,64 @@ class SessionDeletePayload(BaseModel):
 class ProcessDeletePayload(BaseModel):
     process_id: str
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Health
-# ──────────────────────────────────────────────────────────────────────────────
-@app.get("/api/health")
-def health(x_process_id: Optional[str] = Header(None), process_id: Optional[str] = Query(None)):
-    pid = _get_process_id(x_process_id, process_id)
-    return {"ok": True, "process": pid}
+class ProcessInitPayload(BaseModel):
+    process_id: Optional[str] = None
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────────
+# Health
+# ────────────────────────────────────────────────────────────────────────────────
+# For health endpoint only (doesn't need process):
+@app.get("/api/health")
+def health():
+    return {"ok": True}
+
+# ────────────────────────────────────────────────────────────────────────────────
+# Process Initialization (NEW)
+# ────────────────────────────────────────────────────────────────────────────────
+@app.post("/api/process/init")
+def process_init(
+    payload: ProcessInitPayload = ProcessInitPayload(),
+    x_process_id: Optional[str] = Header(None), 
+    process_id: Optional[str] = Query(None)
+):
+    """
+    Ensure process directories exist. Safe to call multiple times.
+    """
+    pid = _get_process_id(x_process_id, process_id, payload.process_id)
+    try:
+        ensure_process_dirs(pid)
+        return {"ok": True, "process_id": pid}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to initialize process: {e}")
+
+# ────────────────────────────────────────────────────────────────────────────────
 # Zones (global layout for a process)
-# ──────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────────
 @app.get("/api/zones/load")
 def zones_load(
     zones_id: Optional[str] = Query(None), session_id: Optional[str] = Query(None),
     x_process_id: Optional[str] = Header(None), process_id: Optional[str] = Query(None)
 ):
     pid = _get_process_id(x_process_id, process_id)
+    print(f"[zones/load] Loading zones for process: {pid}")
+    
     if not (zones_id or session_id):
         raise HTTPException(status_code=422, detail="Missing zones_id or session_id")
-    return load_zones_global(pid)
+    
+    # Ensure process directories exist when loading zones for a new process
+    try:
+        ensure_process_dirs(pid)
+    except Exception:
+        pass  # If it fails, zones will just be empty
+    
+    zones = load_zones_global(pid)
+    print(f"[zones/load] Found {len(zones)} zones")
+    
+    # Ensure we're returning a proper list
+    if not isinstance(zones, list):
+        zones = []
+    
+    return zones
 
 @app.post("/api/zones/save")
 def zones_save(
@@ -199,12 +241,13 @@ def zones_save(
     zones = payload.get("zones")
     if zones is None:
         raise HTTPException(status_code=422, detail="Missing 'zones' in body")
+    # This will create directories if they don't exist
     save_zones_global(pid, zones)
     return {"ok": True}
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────────
 # Ingest (save zone crops under captures/<timestamp>)
-# ──────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────────
 @app.post("/api/ingest")
 def ingest(
     payload: IngestPayload,
@@ -213,9 +256,18 @@ def ingest(
     pid = _get_process_id(x_process_id, process_id, payload.process_id)
     session_id = payload.session_id
     ts = str(payload.timestamp)
+    
+    # Debug logging
+    print(f"[ingest] Process: {pid}, Session: {session_id}, Timestamp: {ts}")
+    print(f"[ingest] Headers: x_process_id={x_process_id}, Query: process_id={process_id}, Body: process_id={payload.process_id}")
+
+    # Ensure process directories exist
+    ensure_process_dirs(pid)
+    ensure_session_dirs(pid, session_id)
 
     # Target directory (mkdir for write)
     gdir = group_dir(pid, session_id, ts)
+    print(f"[ingest] Target directory: {gdir}")
 
     # Save each image as zone_<id>.jpg, using the ids provided
     if len(payload.zone_ids) != len(payload.images):
@@ -228,7 +280,9 @@ def ingest(
             out = gdir / f"zone_{int(zid)}.jpg"
             save_zone_image(img, out, quality=92)
             saved.append(out.name)
+            print(f"[ingest] Saved: {out}")
         except Exception as e:
+            print(f"[ingest] Failed to save zone {zid}: {e}")
             raise HTTPException(status_code=400, detail=f"Failed saving zone {zid}: {e}")
 
     # Compute + persist model prediction so folder cards can show it immediately
@@ -243,11 +297,12 @@ def ingest(
         "timestamp": ts,
         "saved": saved,
         "rel_dir": f"captures/{ts}",
+        "process_id": pid  # Return for debugging
     }
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────────
 # Groups (per session) & Groups All (across sessions)
-# ──────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────────
 @app.get("/api/groups")
 def groups(
     session_id: str = Query(...),
@@ -309,9 +364,9 @@ def groups_all(
 
     return {"groups": all_groups}
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────────
 # Annotations
-# ──────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────────
 @app.get("/api/annotations")
 def annotations_get(
     session_id: str = Query(...),
@@ -352,9 +407,9 @@ def annotations_annotate(
     save_annotations_for_session(pid, sid, sess_map)
     return {"ok": True, "timestamp": ts_key, "session_id": sid, "annotation": entry}
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────────
 # Vocab (objects with id/name to match Labeler.jsx expectations)
-# ──────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────────
 def _vocab_objects(lst: List[str]) -> List[Dict[str, str]]:
     return [{"id": s, "name": s} for s in lst if isinstance(s, str) and s.strip()]
 
@@ -372,6 +427,8 @@ def vocab_post(
     x_process_id: Optional[str] = Header(None), process_id: Optional[str] = Query(None),
 ):
     pid = _get_process_id(x_process_id, process_id)
+    # Ensure process exists
+    ensure_process_dirs(pid)
     vocab = read_vocab(pid)  # list[str]
     name = (item.name or "").strip()
     created = False
@@ -382,9 +439,9 @@ def vocab_post(
     label_obj = {"id": name, "name": name} if name else None
     return {"ok": True, "created": created, "labels": _vocab_objects(vocab), "label": label_obj}
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────────
 # Delete group / image / session / process
-# ──────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────────
 @app.post("/api/group/delete")
 def group_delete(
     payload: DeleteGroupPayload,
@@ -425,13 +482,15 @@ def process_delete(
     x_process_id: Optional[str] = Header(None), process_id: Optional[str] = Query(None)
 ):
     # Always trust explicit body id; fallback to header/query only if body missing
-    pid = _get_process_id(x_process_id, process_id, payload.process_id or None)
+    pid = payload.process_id if payload.process_id else _get_process_id(x_process_id, process_id)
+    if not pid or pid == "default":
+        raise HTTPException(status_code=400, detail="Invalid process_id")
     ok = delete_process_dir(pid)
     return {"ok": ok}
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Predict (stubbed – deterministic)
-# ──────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────────
+# Predict (stubbed — deterministic)
+# ────────────────────────────────────────────────────────────────────────────────
 @app.post("/api/predict")
 def predict(
     session_id: str = Query(...),
@@ -476,9 +535,9 @@ def predict_group_alias(
 ):
     return predict_group(session_id=session_id, timestamp=timestamp, x_process_id=x_process_id, process_id=process_id)
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────────
 # Training stubs (now ensure model dir exists + write a tiny metadata file)
-# ──────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────────
 _TRAIN_STATE: Dict[str, Dict[str, Any]] = {}
 
 @app.post("/api/train")

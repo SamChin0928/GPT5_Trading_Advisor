@@ -20,8 +20,14 @@ const toQuery = (obj = {}) => {
 
 // ---- current process context (forward-compatible) ----
 let _currentProcessId = null
-export const setProcess = (pid) => { _currentProcessId = pid ? String(pid) : null }
-export const clearProcess = () => { _currentProcessId = null }
+export const setProcess = (pid) => { 
+  _currentProcessId = pid ? String(pid) : null 
+  console.log('[api] Process context set to:', _currentProcessId)
+}
+export const clearProcess = () => { 
+  console.log('[api] Process context cleared')
+  _currentProcessId = null 
+}
 export const getProcess = () => _currentProcessId
 
 async function handle(res) {
@@ -63,7 +69,12 @@ function req(
 
   const init = {
     method,
-    headers: { Accept: 'application/json', ...(headers || {}) },
+    headers: { 
+      Accept: 'application/json', 
+      // Add process_id as header too for redundancy
+      ...(headers || {}),
+      ..._currentProcessId ? { 'X-Process-Id': _currentProcessId } : {}
+    },
     signal: signal || ctrl.signal,
   }
 
@@ -74,6 +85,10 @@ function req(
     }
     init.headers['Content-Type'] = 'application/json'
     init.body = JSON.stringify(body)
+    // Debug log for ingest
+    if (path.includes('/ingest')) {
+      console.log('[api] Ingest request:', { path, process_id: _currentProcessId, body: { ...body, images: '[truncated]' } })
+    }
   } else if (form instanceof FormData) {
     if (_currentProcessId && !form.has('process_id')) {
       try { form.append('process_id', _currentProcessId) } catch {}
@@ -141,7 +156,11 @@ export const realtime = {
 // PROD: if BASE is set (absolute API), use /data (FastAPI static mount).
 const sessionImageUrl = (session_id, relPath) => {
   const safe = String(relPath).split('/').map(encodeURIComponent).join('/')
-  const pid = encodeURIComponent(String(_currentProcessId || 'default'))
+  if (!_currentProcessId) {
+    console.warn('[api] sessionImageUrl called without process context')
+    return ''
+  }
+  const pid = encodeURIComponent(String(_currentProcessId))
   const DATA_PREFIX = BASE ? '/data' : '/api/data'
   return join(BASE, `${DATA_PREFIX}/${pid}/sessions/${encodeURIComponent(session_id)}/${safe}`)
 }
@@ -163,20 +182,40 @@ export const api = {
   getProcess,
   clearProcess,
 
+  // ---- NEW: process initialization ----
+  initProcess: () => {
+    console.log('[api] Initializing process:', _currentProcessId)
+    return req('/api/process/init', { method: 'POST', json: {} })
+  },
+
   // ---- health ----
   health: () => req('/api/health'),
 
   // ---- zones ----
-  saveZones: (session_id, zones) =>
-    req('/api/zones/save', { method: 'POST', json: { session_id, zones } }),
+  saveZones: (session_id, zones) => {
+    console.log('[api] Saving zones for process:', _currentProcessId, 'zones:', zones)
+    return req('/api/zones/save', { method: 'POST', json: { session_id, zones } })
+  },
 
-  loadZones: (session_id) =>
-    req('/api/zones/load', { query: { session_id } }),
+  loadZones: (session_id) => {
+    console.log('[api] Loading zones for process:', _currentProcessId)
+    return req('/api/zones/load', { query: { session_id } })
+  },
 
   // ---- ingest / consolidate / mosaics ----
-  ingest: (payload) =>
-    req('/api/ingest', { method: 'POST', json: payload })
-      .then((r) => { notifyUpdate('capture', { session_id: payload.session_id, timestamp: payload.timestamp }); return r }),
+  ingest: (payload) => {
+    console.log('[api] Ingest called with process:', _currentProcessId, 'session:', payload.session_id, 'timestamp:', payload.timestamp)
+    return req('/api/ingest', { method: 'POST', json: payload })
+      .then((r) => { 
+        console.log('[api] Ingest success:', r)
+        notifyUpdate('capture', { session_id: payload.session_id, timestamp: payload.timestamp })
+        return r 
+      })
+      .catch((err) => {
+        console.error('[api] Ingest failed:', err)
+        throw err
+      })
+  },
 
   consolidate: (session_id) =>
     req('/api/consolidate', { method: 'POST', json: { session_id } })
@@ -257,9 +296,11 @@ export const api = {
       .then((r) => { notifyUpdate('session_deleted', { session_id }); return r }),
 
   // NEW: delete a whole process (data/{process_id})
-  deleteProcess: (process_id) =>
-    req('/api/process/delete', { method: 'POST', json: { process_id } })
-      .then((r) => { notifyUpdate('process_deleted', { process_id }); return r }),
+  deleteProcess: (process_id) => {
+    console.log('[api] Deleting process:', process_id)
+    return req('/api/process/delete', { method: 'POST', json: { process_id } })
+      .then((r) => { notifyUpdate('process_deleted', { process_id }); return r })
+  },
 
   // NEW: convenience wrapper for current process
   deleteCurrentProcess: () => {

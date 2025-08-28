@@ -2,6 +2,7 @@
 import React, { useEffect, useState } from 'react'
 import FirstPage from './components/FirstPage'
 import ProcessWorkspace from './components/ProcessWorkspace'
+import { api } from './lib/api'
 
 // Tiny route parser
 function parseRoute() {
@@ -24,6 +25,9 @@ export default function App() {
   const [route, setRoute] = useState(parseRoute())
 
   useEffect(() => {
+    // Clear any stale process context when app mounts
+    api.clearProcess()
+
     const onPop = () => setRoute(parseRoute())
     window.addEventListener('popstate', onPop)
     // Expose SPA nav so FirstPage can call window.appNavigate(`/process/<id>`)
@@ -31,6 +35,8 @@ export default function App() {
     return () => {
       window.removeEventListener('popstate', onPop)
       delete window.appNavigate
+      // Clear process when unmounting
+      api.clearProcess()
     }
   }, [])
 

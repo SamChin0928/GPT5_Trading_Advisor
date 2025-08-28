@@ -137,7 +137,7 @@ function LoginView({ authApi }) {
           <div className="rounded-2xl border border-neutral-800 bg-neutral-900/40 p-6">
             <h3 className="font-semibold text-neutral-200">What happens next?</h3>
             <ul className="mt-3 space-y-2 text-neutral-400 text-sm">
-              <li>• After sign-in, you’ll be redirected to your personal process list.</li>
+              <li>• After sign-in, you'll be redirected to your personal process list.</li>
               <li>• Create new processes or search existing ones.</li>
               <li>• Clicking a process will route you to its workspace.</li>
             </ul>
@@ -216,13 +216,33 @@ function ProcessesView({ authApi }) {
   }
 
   async function deleteProcess(p) {
-    if (!confirm(`Delete process "${p.name || p.id}"? This will remove it from your list.`)) return
+    if (!confirm(`Delete process "${p.name || p.id}"? This will remove it from your list and delete all associated data.`)) return
     setDeletingId(p.id)
     try {
+      // First, delete from backend filesystem
+      try {
+        if (typeof api?.deleteProcess === 'function') {
+          // Need to set the process context before deleting
+          const currentProcess = api.getProcess()
+          api.setProcess(p.id)
+          await api.deleteProcess(p.id)
+          // Restore previous context if it was different
+          if (currentProcess !== p.id) {
+            api.setProcess(currentProcess)
+          }
+          // Clear the context after deletion since this process no longer exists
+          api.clearProcess()
+        }
+      } catch (backendErr) {
+        console.warn('Backend deletion failed (data may remain on disk):', backendErr)
+        // Continue with Firestore deletion even if backend fails
+        // Clear the context after deletion since this process no longer exists
+        api.clearProcess() // Clear even on error
+      }
+      
+      // Then delete from Firestore
       const { fs, doc, deleteDoc } = await fb()
       await deleteDoc(doc(db, 'users', user.uid, 'processes', p.id))
-      // (Optional backend cleanup can be called here if implemented)
-      // try { if (typeof api?.deleteProcess === 'function') await api.deleteProcess(p.id) } catch {}
     } catch (e) {
       console.error(e)
       setError(e.message || 'Failed to delete process')
